@@ -31,3 +31,4 @@ reports/portfolio-latest.md
 # generated KR pipeline artifacts
 data/kr_recall_pool.json
 data/kr_screen_result.json
+data/kr_screen2_result.json
