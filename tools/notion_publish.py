@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
-"""Notion 발행기 — "경제 분석" 페이지 하위에 종목 리서치 DB를 만들고 보고서를 등록.
+"""Notion 발행기 — "경제 분석" 하위에 월별 페이지 + 종목 리서치 DB, 최소 컬럼.
 
-AI Berkshire 한국 파이프라인 ⑤단계. 주간 딥리서치 결과를 Notion DB 행으로 등록.
-헤드리스 크론 대비: MCP가 아닌 Notion REST API를 curl로 직접 호출.
+구조:
+  경제 분석(루트) → 2026-06(월 페이지) → "종목 리서치" DB → 종목별 행
+                  → 2026-07(월 페이지) → DB ...        (월 바뀌면 자동 새 페이지)
 
-인증: ~/.notion_token (또는 $NOTION_TOKEN). 인테그레이션을 대상 페이지에 '연결'해야 함.
+DB 컬럼(최소): 종목명(제목) · 종합점수 · 종합의견 · 한줄의견 · 분석일.
+그 외 상세(시장·4대가 점수·재무·전문)는 각 행(페이지) 본문 안에 들어간다.
+
+인증: ~/.notion_token (또는 $NOTION_TOKEN). 인테그레이션을 루트 페이지에 '연결'해야 함.
+상태: data/notion_db.json = {"root": <page_id>, "months": {"YYYY-MM": {"page_id","db_id"}}}
 
 사용법:
-    python3 tools/notion_publish.py find-page "경제 분석"        # 페이지 id 검색
-    python3 tools/notion_publish.py ensure-db <page_id>          # DB 생성/재사용 → data/notion_db.json
-    python3 tools/notion_publish.py add report.json              # 보고서 1건 등록
-        report.json 예: {"name":"삼성전자","code":"005930","market":"KOSPI",
-                          "score":3.25,"verdict":"보류","one_liner":"...",
-                          "s_biz":3.5,"s_fin":3.0,"s_ind":3.0,"s_risk":3.5,
-                          "gross_margin":38.0,"ocf_ni":2.12,"fcf_eok":28442,
-                          "body_md":"# ...전체 한국어 리포트 마크다운..."}
-
-Python >= 3.8, 외부 의존성 없음.
+    python3 tools/notion_publish.py find-page "경제 분석"     # page_id 검색
+    python3 tools/notion_publish.py set-root <page_id>       # 루트(경제 분석) 지정
+    python3 tools/notion_publish.py ensure-month 2026-06     # 월 페이지+DB 생성/재사용
+    python3 tools/notion_publish.py add report.json          # report.date의 월로 라우팅
 """
 
 import argparse
@@ -28,7 +27,7 @@ import sys
 _TIMEOUT = 30
 _VER = "2022-06-28"
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_DBFILE = os.path.join(_ROOT, "data", "notion_db.json")
+_CFG = os.path.join(_ROOT, "data", "notion_db.json")
 
 
 def _token():
@@ -38,8 +37,7 @@ def _token():
         if os.path.exists(p):
             t = open(p).read().strip()
     if not t:
-        sys.stderr.write("❌ Notion 토큰 없음. ~/.notion_token 또는 $NOTION_TOKEN.\n")
-        sys.exit(2)
+        sys.stderr.write("❌ Notion 토큰 없음.\n"); sys.exit(2)
     return t
 
 
@@ -47,22 +45,31 @@ def _api(method, path, body=None):
     args = ["/usr/bin/curl", "-s", "--noproxy", "*", "-X", method,
             f"https://api.notion.com/v1{path}",
             "-H", f"Authorization: Bearer {_token()}",
-            "-H", f"Notion-Version: {_VER}",
-            "-H", "Content-Type: application/json"]
+            "-H", f"Notion-Version: {_VER}", "-H", "Content-Type: application/json"]
     if body is not None:
         args += ["-d", json.dumps(body, ensure_ascii=False)]
     r = subprocess.run(args, capture_output=True, timeout=_TIMEOUT)
-    data = json.loads(r.stdout.decode("utf-8", errors="replace") or "{}")
-    if data.get("object") == "error":
-        sys.stderr.write(f"⚠️ Notion API 오류 {data.get('status')}: {data.get('message')}\n")
-    return data
+    d = json.loads(r.stdout.decode("utf-8", errors="replace") or "{}")
+    if d.get("object") == "error":
+        sys.stderr.write(f"⚠️ Notion {d.get('status')}: {d.get('message')}\n")
+    return d
 
 
-# ---------------------------------------------------------------------------
+def _cfg():
+    return json.load(open(_CFG, encoding="utf-8")) if os.path.exists(_CFG) else {"root": None, "months": {}}
+
+
+def _save_cfg(c):
+    os.makedirs(os.path.dirname(_CFG), exist_ok=True)
+    json.dump(c, open(_CFG, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+
+
+def _rt(text):
+    return [{"type": "text", "text": {"content": (text or "")[:2000]}}]
+
 
 def _title_of(r):
-    props = r.get("properties", {})
-    for v in props.values():
+    for v in r.get("properties", {}).values():
         if v.get("type") == "title":
             return "".join(x.get("plain_text", "") for x in v.get("title", []))
     return "".join(x.get("plain_text", "") for x in r.get("title", [])) or "(제목없음)"
@@ -73,122 +80,133 @@ def cmd_find_page(query):
              "filter": {"property": "object", "value": "page"}, "page_size": 20})
     res = d.get("results", [])
     if not res:
-        print("⚠️ 접근 가능한 페이지 0개 — 인테그레이션을 대상 페이지에 '연결'했는지 확인하세요.")
-        return
+        print("⚠️ 접근 가능한 페이지 0개 — 인테그레이션 '연결' 확인.")
     for r in res:
         print(f"  page  {_title_of(r)!r}  id={r.get('id')}")
 
 
+def cmd_set_root(page_id):
+    c = _cfg(); c["root"] = page_id; _save_cfg(c)
+    print(f"✅ 루트(경제 분석) 지정: {page_id}")
+
+
+# 최소 컬럼 스키마
 _SCHEMA = {
     "종목명": {"title": {}},
-    "종목코드": {"rich_text": {}},
-    "시장": {"select": {"options": [{"name": "KOSPI"}, {"name": "KOSDAQ"}]}},
     "종합점수": {"number": {"format": "number"}},
-    "투자결론": {"select": {"options": [
+    "종합의견": {"select": {"options": [
         {"name": "매수", "color": "green"}, {"name": "보류", "color": "yellow"},
         {"name": "관망", "color": "orange"}, {"name": "제외", "color": "red"}]}},
-    "사업모델(段)": {"number": {}}, "재무(버핏)": {"number": {}},
-    "산업(멍거)": {"number": {}}, "리스크(리루)": {"number": {}},
-    "매출총이익률": {"number": {}}, "OCF/NI": {"number": {}}, "FCF(억)": {"number": {}},
-    "한줄결론": {"rich_text": {}},
+    "한줄의견": {"rich_text": {}},
     "분석일": {"date": {}},
 }
 
 
-def cmd_ensure_db(page_id):
-    # 이미 만든 DB가 있으면 재사용
-    if os.path.exists(_DBFILE):
-        saved = json.load(open(_DBFILE))
-        if saved.get("parent") == page_id:
-            print(f"기존 DB 재사용: {saved['db_id']}")
-            return saved["db_id"]
-    d = _api("POST", "/databases", {
+def _ensure_month(month):
+    """월 페이지 + DB 보장. (page_id, db_id) 반환."""
+    c = _cfg()
+    if not c.get("root"):
+        sys.stderr.write("❌ 루트 미지정. set-root <경제분석 page_id> 먼저.\n"); sys.exit(1)
+    if month in c["months"]:
+        return c["months"][month]["page_id"], c["months"][month]["db_id"]
+    # 월 페이지 생성
+    pg = _api("POST", "/pages", {
+        "parent": {"type": "page_id", "page_id": c["root"]},
+        "properties": {"title": {"title": _rt(f"{month} 종목 분석")}},
+    })
+    page_id = pg.get("id")
+    if not page_id:
+        sys.stderr.write("❌ 월 페이지 생성 실패.\n"); sys.exit(1)
+    # DB 생성
+    db = _api("POST", "/databases", {
         "parent": {"type": "page_id", "page_id": page_id},
-        "title": [{"type": "text", "text": {"content": "코스피·코스닥 종목 리서치"}}],
+        "title": _rt(f"코스피·코스닥 종목 리서치 ({month})"),
         "properties": _SCHEMA,
     })
-    db_id = d.get("id")
+    db_id = db.get("id")
     if not db_id:
         sys.stderr.write("❌ DB 생성 실패.\n"); sys.exit(1)
-    os.makedirs(os.path.dirname(_DBFILE), exist_ok=True)
-    json.dump({"db_id": db_id, "parent": page_id}, open(_DBFILE, "w"))
-    print(f"✅ DB 생성: {db_id}\n   저장: {_DBFILE}")
-    return db_id
+    c["months"][month] = {"page_id": page_id, "db_id": db_id}
+    _save_cfg(c)
+    print(f"✅ 월 구조 생성: {month} (page {page_id[:8]}…, db {db_id[:8]}…)")
+    return page_id, db_id
 
 
-def _rt(text):
-    return [{"type": "text", "text": {"content": (text or "")[:2000]}}]
+def cmd_ensure_month(month):
+    _ensure_month(month)
 
 
 def _md_to_blocks(md):
-    """마크다운을 Notion 블록으로(제목/불릿/표는 단순 문단, 2000자 제한)."""
     blocks = []
     for line in (md or "").splitlines():
         s = line.rstrip()
         if not s:
             continue
         if s.startswith("### "):
-            blocks.append({"heading_3": {"rich_text": _rt(s[4:])}})
+            b = {"heading_3": {"rich_text": _rt(s[4:])}}
         elif s.startswith("## "):
-            blocks.append({"heading_2": {"rich_text": _rt(s[3:])}})
+            b = {"heading_2": {"rich_text": _rt(s[3:])}}
         elif s.startswith("# "):
-            blocks.append({"heading_1": {"rich_text": _rt(s[2:])}})
+            b = {"heading_1": {"rich_text": _rt(s[2:])}}
         elif s.startswith(("- ", "* ")):
-            blocks.append({"bulleted_list_item": {"rich_text": _rt(s[2:])}})
+            b = {"bulleted_list_item": {"rich_text": _rt(s[2:])}}
         else:
-            blocks.append({"paragraph": {"rich_text": _rt(s)}})
-        if len(blocks) >= 95:  # Notion children 100개 제한 여유
+            b = {"paragraph": {"rich_text": _rt(s)}}
+        blocks.append({"object": "block", "type": list(b)[0], **b})
+        if len(blocks) >= 95:
             break
-    return [{"object": "block", "type": list(b)[0], **b} for b in blocks]
+    return blocks
 
 
-def cmd_add(report_path):
-    r = json.load(open(report_path, encoding="utf-8")) if report_path != "-" \
-        else json.load(sys.stdin)
-    if not os.path.exists(_DBFILE):
-        sys.stderr.write("❌ DB가 없습니다. ensure-db 먼저.\n"); sys.exit(1)
-    db_id = json.load(open(_DBFILE))["db_id"]
+def _detail_header(r):
+    """행 본문 맨 위에 넣을 요약(시장·4대가·재무) 마크다운."""
+    def s(x):
+        return "-" if x is None else x
+    return (
+        f"## 요약\n"
+        f"- 시장/코드: {s(r.get('market'))} {s(r.get('code'))}\n"
+        f"- 4대가 점수 — 돤융핑(사업) {s(r.get('s_biz'))} · 버핏(재무) {s(r.get('s_fin'))} · "
+        f"멍거(산업) {s(r.get('s_ind'))} · 리루(리스크) {s(r.get('s_risk'))}\n"
+        f"- 재무 — 매출총이익률 {s(r.get('gross_margin'))}% · OCF/NI {s(r.get('ocf_ni'))} · "
+        f"누적FCF {s(r.get('fcf_eok'))}억\n"
+    )
 
-    def num(k):
-        v = r.get(k)
-        return {"number": float(v)} if v is not None else {"number": None}
+
+def cmd_add(report_path, month=None):
+    r = json.load(open(report_path, encoding="utf-8")) if report_path != "-" else json.load(sys.stdin)
+    month = month or (r.get("date") or "")[:7]
+    if not month or len(month) != 7:
+        sys.stderr.write("❌ 월(YYYY-MM)을 결정할 수 없음. report.date 또는 --month 필요.\n"); sys.exit(1)
+    _, db_id = _ensure_month(month)
 
     props = {
         "종목명": {"title": _rt(r.get("name", "?"))},
-        "종목코드": {"rich_text": _rt(r.get("code", ""))},
-        "시장": {"select": {"name": r.get("market", "KOSPI")}},
-        "종합점수": num("score"),
-        "투자결론": {"select": {"name": r.get("verdict", "보류")}},
-        "사업모델(段)": num("s_biz"), "재무(버핏)": num("s_fin"),
-        "산업(멍거)": num("s_ind"), "리스크(리루)": num("s_risk"),
-        "매출총이익률": num("gross_margin"), "OCF/NI": num("ocf_ni"), "FCF(억)": num("fcf_eok"),
-        "한줄결론": {"rich_text": _rt(r.get("one_liner", ""))},
+        "종합점수": {"number": float(r["score"]) if r.get("score") is not None else None},
+        "종합의견": {"select": {"name": r.get("verdict", "보류")}},
+        "한줄의견": {"rich_text": _rt(r.get("one_liner", ""))},
         "분석일": {"date": {"start": r["date"]}} if r.get("date") else {"date": None},
     }
-    body = {"parent": {"database_id": db_id}, "properties": props}
-    blocks = _md_to_blocks(r.get("body_md", ""))
-    if blocks:
-        body["children"] = blocks
-    d = _api("POST", "/pages", body)
+    body_md = _detail_header(r) + "\n" + (r.get("body_md", "") or "")
+    d = _api("POST", "/pages", {"parent": {"database_id": db_id},
+                                "properties": props, "children": _md_to_blocks(body_md)})
     if d.get("id"):
-        print(f"✅ 등록: {r.get('name')} → {d['id']}")
+        print(f"✅ 등록: {r.get('name')} [{month}] → {d['id']}")
     else:
         sys.stderr.write("❌ 등록 실패.\n"); sys.exit(1)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Notion 발행기")
+    ap = argparse.ArgumentParser(description="Notion 발행기 (월별 페이지 + 최소 컬럼)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     fp = sub.add_parser("find-page"); fp.add_argument("query")
-    ed = sub.add_parser("ensure-db"); ed.add_argument("page_id")
-    ad = sub.add_parser("add"); ad.add_argument("report", help="report.json 경로 또는 '-'(stdin)")
-    args = ap.parse_args()
-    if args.cmd == "find-page":
-        cmd_find_page(args.query)
-    elif args.cmd == "ensure-db":
-        cmd_ensure_db(args.page_id)
-    elif args.cmd == "add":
-        cmd_add(args.report)
+    sr = sub.add_parser("set-root"); sr.add_argument("page_id")
+    em = sub.add_parser("ensure-month"); em.add_argument("month")
+    ad = sub.add_parser("add"); ad.add_argument("report"); ad.add_argument("--month")
+    a = ap.parse_args()
+    {"find-page": lambda: cmd_find_page(a.query),
+     "set-root": lambda: cmd_set_root(a.page_id),
+     "ensure-month": lambda: cmd_ensure_month(a.month),
+     "add": lambda: cmd_add(a.report, a.month)}[a.cmd]()
 
 
 if __name__ == "__main__":
