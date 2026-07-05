@@ -23,3 +23,11 @@ reports/美团/command-log.jsonl
 
 # 组合报告只存本地，不公开
 reports/portfolio-latest.md
+
+# secrets
+.notion_token
+.dart_api_key
+
+# generated KR pipeline artifacts
+data/kr_recall_pool.json
+data/kr_screen_result.json
