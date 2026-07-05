@@ -1,5 +1,7 @@
 # 财务数据获取与交叉验证规范
 
+> **[출력 언어] 최종 리포트는 시장과 무관하게 무조건 한국어로 작성한다. (원문 데이터·소스 인용은 원어 병기 가능)**
+
 本规范适用于所有涉及企业财务数据的研究。**每个关键数据必须来自两个独立来源，误差>1%须标记。**
 
 ---
@@ -28,6 +30,25 @@
 |--------|------|-----|---------|
 | 1（主） | **东方财富** | eastmoney.com → 搜股票代码 → 财务报表 | 直接访问 |
 | 2（副） | **巨潮资讯** | cninfo.com.cn | 原始年报/季报PDF |
+
+### 한국 (코스피/코스닥 — 삼성전자 005930, 에코프로비엠 247540 등)
+
+| 우선순위 | 소스 | 도구/URL | 취득 방식 |
+|--------|------|-----|---------|
+| 1（주-시세/밸류에이션） | **네이버 금융** | `python3 tools/krx_data.py {quote\|valuation\|financials\|search} {코드}` | 무키, 즉시 |
+| 2（주-공시/재무 원천） | **DART(전자공시)** | `python3 tools/dart_data.py {corpcode\|company\|financials\|disclosures} ...` | 무료 인증키 필요 |
+| 원천 1차자료 | **DART 원문** | dart.fss.or.kr (사업보고서/반기/분기) | 공시 원문 PDF/뷰어 |
+
+> **한국 종목 필수 절차**:
+> 1. `krx_data.py search {회사명}` 으로 6자리 종목코드 확인
+> 2. `krx_data.py quote/valuation/financials` 로 시세·PER/PBR·연간 재무 수집(네이버, 무키)
+> 3. `dart_data.py corpcode {종목코드}` → DART `corp_code` 획득
+> 4. `dart_data.py financials {corp_code} {연도}` 로 **DART 원천 재무제표(연결 CFS)** 교차검증
+> 5. `dart_data.py disclosures {corp_code}` 로 최근 공시(사업보고서·주요사항·지분변동) 확인 후 보고서에 반영
+>
+> DART 인증키 발급(무료, 즉시): https://opendart.fss.or.kr → 인증키 신청/관리.
+> 설정: `export DART_API_KEY=키` 또는 `echo 키 > ~/.dart_api_key`.
+> 재무 데이터는 **네이버(가공) + DART(원천)** 2개 독립 소스로 교차검증하며, 오차>1%는 표기한다.
 
 ---
 

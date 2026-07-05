@@ -1,5 +1,7 @@
 # 投研团队：四角色并行分析框架
 
+> **[출력 언어] 최종 리포트는 시장과 무관하게 무조건 한국어로 작성한다. (원문 데이터·소스 인용은 원어 병기 가능)**
+
 对 $ARGUMENTS 进行团队化投资研究分析。使用 Team 工具创建真正的多Agent并行研究团队。
 
 ## 执行流程
@@ -113,7 +115,7 @@
 
 **研究方法**：
 - 使用 WebSearch 搜索最新公开信息（财报、行业报告、新闻）
-- **财务数据必须来自两个独立来源**，按 `skills/financial-data.md` 规范执行（美股：macrotrends+stockanalysis；港股：aastocks+macrotrends；A股：东方财富+巨潮资讯），两源误差>1%须标记
+- **财务数据必须来自两个独立来源**，按 `skills/financial-data.md` 规范执行（美股：macrotrends+stockanalysis；港股：aastocks+macrotrends；A股：东方财富+巨潮资讯；한국:네이버금융 krx_data.py+DART dart_data.py），两源误差>1%须标记
 - 确保数据准确，关键数据标注来源
 - 分析要深入，不流于表面
 
