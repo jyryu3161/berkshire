@@ -12,8 +12,12 @@ mkdir -p logs
 LOG="$REPO/logs/kr-monthly.log"
 
 N="${1:-10}"
-MONTH="${2:-auto}"
+MONTH="${2:-file}"
 RESCREEN="${3:-0}"
+# MONTH: file=대상월 파일(kr_active_month.txt), auto=오늘 날짜의 월, 또는 YYYY-MM 직접지정
+if [ "$MONTH" = "file" ]; then
+  MONTH="$(cat "$REPO/data/kr_active_month.txt" 2>/dev/null || date +%Y-%m)"
+fi
 [ "$MONTH" = "auto" ] && MONTH="$(date +%Y-%m)"
 
 echo "===== [$(date '+%F %T %Z')] 그룹 시작 N=$N month=$MONTH rescreen=$RESCREEN =====" >>"$LOG"
