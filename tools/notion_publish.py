@@ -19,10 +19,13 @@ DB 컬럼(최소): 종목명(제목) · 종합점수 · 종합의견 · 한줄�
 """
 
 import argparse
+import datetime
 import json
 import os
 import subprocess
 import sys
+
+_KST = datetime.timezone(datetime.timedelta(hours=9))
 
 _TIMEOUT = 30
 _VER = "2022-06-28"
@@ -184,7 +187,8 @@ def cmd_add(report_path, month=None):
         "종합점수": {"number": float(r["score"]) if r.get("score") is not None else None},
         "종합의견": {"select": {"name": r.get("verdict", "보류")}},
         "한줄의견": {"rich_text": _rt(r.get("one_liner", ""))},
-        "분석일": {"date": {"start": r["date"]}} if r.get("date") else {"date": None},
+        # 분석일 = 실제 분석완료·업로드 시각(KST, 시:분:초 포함)
+        "분석일": {"date": {"start": datetime.datetime.now(_KST).replace(microsecond=0).isoformat()}},
     }
     body_md = _detail_header(r) + "\n" + (r.get("body_md", "") or "")
     d = _api("POST", "/pages", {"parent": {"database_id": db_id},
