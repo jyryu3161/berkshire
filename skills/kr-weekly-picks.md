@@ -28,14 +28,17 @@ python3 tools/kr_deep_queue.py reset             # 새 사이클
 
 ### 2. 이번 주 배치 가져오기
 ```bash
-python3 tools/kr_deep_queue.py next --n 13
+python3 tools/kr_deep_queue.py next --n 5
 ```
 → 처리할 종목(code/name/market/score) JSON. 비어 있으면 사이클 완료이므로
 `kr_deep_queue.py reset` 후 1단계부터 다시(또는 다음 달까지 대기).
+(4-Agent 딥리서치는 종목당 ~30만×4 토큰이므로 기본 배치는 5종목. 약 10~11주에 53종목 순환.)
 
-### 3. 각 종목 딥리서치 (投研团队 4-Agent, 한국어)
-배치의 **각 종목마다** `skills/investment-team.md` 방식으로 4개 Agent를 병렬 실행한다:
-- Agent1 段永平(사업모델·해자) / Agent2 버핏(재무·밸류) / Agent3 멍거(산업·역발상) / Agent4 리루(리스크·경영진)
+### 3. 각 종목 딥리서치 (投研团队 4-Agent 병렬, 한국어) — 원본 /investment-team 그대로
+배치의 **각 종목마다** `skills/investment-team.md` 방식으로 **4개 Agent를 한 메시지에서 병렬** 실행한다.
+핵심: 4명은 각자 **독립적으로 완전 리서치**하고 **서로 반박**한다(단순 분업 아님). 팀장이 충돌을 종합한다.
+- Agent1 돤융핑(사업모델·해자) / Agent2 버핏(재무·밸류·3시나리오) / Agent3 멍거(산업·역발상·실패시나리오) / Agent4 리루(장기확실성·경영진·리스크)
+- 각 Agent는 독립적으로 데이터 취득·교차검증·결론·★점수를 산출한다(다른 Agent 결과에 의존 금지).
 - 데이터는 반드시 절대경로 툴로 교차검증:
   - `python3 /home/ubuntu/ai-berkshire/tools/krx_data.py {quote|valuation|financials} {code}` (네이버, 무키)
   - `python3 /home/ubuntu/ai-berkshire/tools/dart_data.py {corpcode|financials|disclosures} ...` (DART 원천)
@@ -61,7 +64,7 @@ python3 tools/kr_deep_queue.py status
 ```
 
 ## 비용 주의
-딥리서치 1종목 ≈ 4-Agent 약 30만 토큰. 배치 13종목 ≈ 주당 ~4M 토큰. 배치 크기(`--n`)로 조절.
+딥리서치 1종목 = 4-Agent 병렬 ≈ 120만 토큰. 기본 배치 5종목 ≈ 주당 ~6M 토큰. 배치 크기(`--n`)로 조절.
 
 ## 산출물
 - Notion "경제 분석" → "코스피·코스닥 종목 리서치" DB에 종목별 행(점수·결론·재무·전문) 누적.
