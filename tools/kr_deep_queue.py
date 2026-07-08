@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""딥리서치 롤링 큐 — 2차 통과분을 매주 상위 N개씩 순환 처리.
+"""딥리서치 롤링 큐 — 상위 300 유니버스를 매주 상위 N개씩 순환 처리.
 
-AI Berkshire 한국 파이프라인 ④단계 스케줄러. kr_screen2_result.json(통과분,
-점수순)을 큐로 삼아 매주 미처리 상위 N개를 배출한다. 모두 처리되면 한 사이클
-완료 → reset 으로 다음 사이클(월 1회 재스크리닝 후) 시작.
+AI Berkshire 한국 파이프라인 ④단계 스케줄러. kr_deep_universe.json(상위 300종목,
+去劣 통과분 우선 → 시총 상위순)을 큐로 삼아 매주 미처리 상위 N개를 배출한다.
+12주(주당 25종목)에 걸쳐 300종목을 중복 없이 순차 분석하고, 모두 처리되면 한
+사이클 완료 → reset 으로 다음 사이클(재스크리닝 후) 시작.
+
+유니버스가 없으면 2차 去劣 통과분(kr_screen2_result.json)으로 폴백한다.
 
 상태파일: data/kr_deep_queue.json  {"done":[...codes...], "cycle":n}
 
 사용법:
-    python3 tools/kr_deep_queue.py next --n 13     # 이번 주 배치(코드,이름,시장) 출력(JSON)
+    python3 tools/kr_deep_queue.py next --n 5      # 이번 배치(코드,이름,시장) 출력(JSON)
     python3 tools/kr_deep_queue.py mark 005930,000660,...   # 처리 완료 표시
     python3 tools/kr_deep_queue.py status
     python3 tools/kr_deep_queue.py reset           # 사이클 초기화(재스크리닝 후)
@@ -22,13 +25,18 @@ import os
 import sys
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_UNIVERSE = os.path.join(_ROOT, "data", "kr_deep_universe.json")
 _SCREEN2 = os.path.join(_ROOT, "data", "kr_screen2_result.json")
 _STATE = os.path.join(_ROOT, "data", "kr_deep_queue.json")
 
 
 def _pass_list():
+    """큐 소스(우선순위 정렬 완료). 유니버스 우선, 없으면 2차 去劣 통과분 폴백."""
+    if os.path.exists(_UNIVERSE):
+        return list(json.load(open(_UNIVERSE, encoding="utf-8"))["universe"])
     if not os.path.exists(_SCREEN2):
-        sys.stderr.write("❌ 2차 결과 없음. kr_quality_screen2.py run 먼저.\n"); sys.exit(1)
+        sys.stderr.write("❌ 유니버스·2차 결과 모두 없음. "
+                         "kr_universe.py build 먼저.\n"); sys.exit(1)
     p = [r for r in json.load(open(_SCREEN2, encoding="utf-8"))["pass_list"]]
     p.sort(key=lambda r: r.get("score") or 0, reverse=True)
     return p
@@ -80,7 +88,7 @@ def cmd_reset():
 def main():
     ap = argparse.ArgumentParser(description="딥리서치 롤링 큐")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    n = sub.add_parser("next"); n.add_argument("--n", type=int, default=13)
+    n = sub.add_parser("next"); n.add_argument("--n", type=int, default=5)
     m = sub.add_parser("mark"); m.add_argument("codes")
     sub.add_parser("status"); sub.add_parser("reset")
     a = ap.parse_args()

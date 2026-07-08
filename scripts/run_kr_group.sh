@@ -11,6 +11,14 @@ cd "$REPO" || exit 1
 mkdir -p logs
 LOG="$REPO/logs/kr-monthly.log"
 
+# 시작일 가드 — 이 날짜 이전에는 크론이 걸려도 실행하지 않음(첫 사이클 개시일 지정).
+# data/kr_start_date.txt (YYYY-MM-DD). 파일이 없으면 가드 없이 즉시 실행.
+START="$(cat "$REPO/data/kr_start_date.txt" 2>/dev/null || true)"
+if [ -n "$START" ] && [ "$(date +%F)" \< "$START" ]; then
+  echo "===== [$(date '+%F %T %Z')] 시작일($START) 이전 — 스킵 =====" >>"$LOG"
+  exit 0
+fi
+
 N="${1:-10}"
 MONTH="${2:-file}"
 RESCREEN="${3:-0}"
@@ -22,19 +30,34 @@ fi
 
 echo "===== [$(date '+%F %T %Z')] 그룹 시작 N=$N month=$MONTH rescreen=$RESCREEN =====" >>"$LOG"
 
-if [ "$RESCREEN" = "1" ]; then
-  echo "  재스크리닝 중..." >>"$LOG"
+rescreen() {
+  echo "  재스크리닝 중 (召回池·去劣·유니버스300·큐리셋)..." >>"$LOG"
   python3 tools/kr_recall_pool.py build --kospi 200 --kosdaq 150 >>"$LOG" 2>&1
   python3 tools/kr_quality_screen.py run  >>"$LOG" 2>&1
   python3 tools/kr_quality_screen2.py run >>"$LOG" 2>&1
+  python3 tools/kr_universe.py build --n 300 >>"$LOG" 2>&1
   python3 tools/kr_deep_queue.py reset    >>"$LOG" 2>&1
-fi
+  date +%Y-%m > "$REPO/data/kr_active_month.txt"
+}
 
-# 이번 그룹 종목코드 추출 (아직 처리 안 된 상위 N)
-CODES=$(python3 tools/kr_deep_queue.py next --n "$N" \
-        | python3 -c "import sys,json; b=json.load(sys.stdin); print(','.join(x['code'] for x in b))")
+fetch_codes() {
+  python3 tools/kr_deep_queue.py next --n "$N" \
+    | python3 -c "import sys,json; b=json.load(sys.stdin); print(','.join(x['code'] for x in b))"
+}
+
+[ "$RESCREEN" = "1" ] && rescreen
+
+# 이번 배치 종목코드 추출 (아직 처리 안 된 상위 N)
+CODES=$(fetch_codes)
+# 큐 소진(300종목 12주 사이클 완료) → 자동 재스크리닝 후 재시도(무한루프 방지: 1회)
 if [ -z "$CODES" ]; then
-  echo "  큐 비어있음 — 사이클 완료." >>"$LOG"; exit 0
+  echo "  큐 비어있음 — 사이클 완료. 자동 재스크리닝 후 새 사이클 시작." >>"$LOG"
+  rescreen
+  MONTH="$(date +%Y-%m)"
+  CODES=$(fetch_codes)
+fi
+if [ -z "$CODES" ]; then
+  echo "  재스크리닝 후에도 큐 비어있음 — 종료." >>"$LOG"; exit 0
 fi
 echo "  배치 종목: $CODES" >>"$LOG"
 
