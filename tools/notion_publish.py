@@ -105,45 +105,134 @@ _SCHEMA = {
 }
 
 
-def _ensure_month(month):
-    """월 페이지 + DB 보장. (page_id, db_id) 반환."""
+def _ensure_bucket(bucket):
+    """버킷(사이클 또는 월) 페이지 + DB 보장. (page_id, db_id) 반환.
+
+    bucket 문자열이 그대로 라우팅 키·제목에 쓰인다.
+    예) '사이클 2 (2026-07~)' 또는 back-compat 월 '2026-07'.
+    (상태파일 dict 키는 back-compat 위해 'months'를 그대로 재사용 — 임의 문자열 키 허용.)
+    """
     c = _cfg()
     if not c.get("root"):
         sys.stderr.write("❌ 루트 미지정. set-root <경제분석 page_id> 먼저.\n"); sys.exit(1)
-    if month in c["months"]:
-        return c["months"][month]["page_id"], c["months"][month]["db_id"]
-    # 월 페이지 생성
+    if bucket in c["months"]:
+        return c["months"][bucket]["page_id"], c["months"][bucket]["db_id"]
+    # 버킷 페이지 생성
     pg = _api("POST", "/pages", {
         "parent": {"type": "page_id", "page_id": c["root"]},
-        "properties": {"title": {"title": _rt(f"{month} 종목 분석")}},
+        "properties": {"title": {"title": _rt(f"{bucket} 종목 분석")}},
     })
     page_id = pg.get("id")
     if not page_id:
-        sys.stderr.write("❌ 월 페이지 생성 실패.\n"); sys.exit(1)
+        sys.stderr.write("❌ 버킷 페이지 생성 실패.\n"); sys.exit(1)
     # DB 생성
     db = _api("POST", "/databases", {
         "parent": {"type": "page_id", "page_id": page_id},
-        "title": _rt(f"코스피·코스닥 종목 리서치 ({month})"),
+        "title": _rt(f"코스피·코스닥 종목 리서치 · {bucket}"),
         "properties": _SCHEMA,
     })
     db_id = db.get("id")
     if not db_id:
         sys.stderr.write("❌ DB 생성 실패.\n"); sys.exit(1)
-    c["months"][month] = {"page_id": page_id, "db_id": db_id}
+    c["months"][bucket] = {"page_id": page_id, "db_id": db_id}
     _save_cfg(c)
-    print(f"✅ 월 구조 생성: {month} (page {page_id[:8]}…, db {db_id[:8]}…)")
+    print(f"✅ 버킷 구조 생성: {bucket} (page {page_id[:8]}…, db {db_id[:8]}…)")
     return page_id, db_id
 
 
-def cmd_ensure_month(month):
-    _ensure_month(month)
+def cmd_ensure_bucket(bucket):
+    _ensure_bucket(bucket)
 
 
-def _md_to_blocks(md):
+def cmd_archive_bucket(bucket):
+    """버킷 페이지를 아카이브(휴지통 이동, 하위 DB·행 포함)하고 설정에서 제거."""
+    c = _cfg()
+    if bucket not in c["months"]:
+        sys.stderr.write(f"❌ 버킷 없음: {bucket}\n"); sys.exit(1)
+    page_id = c["months"][bucket]["page_id"]
+    d = _api("PATCH", f"/pages/{page_id}", {"archived": True})
+    if d.get("object") == "error":
+        sys.stderr.write("❌ 아카이브 실패.\n"); sys.exit(1)
+    del c["months"][bucket]
+    _save_cfg(c)
+    print(f"✅ 아카이브: {bucket} (page {page_id[:8]}… 휴지통 이동)")
+
+
+# ── 마크다운 표 → Notion table 블록 ─────────────────────────────
+def _is_table_row(s):
+    """'| a | b |' 형태의 표 행인가. 셀 구분 파이프가 2개 이상."""
+    s = s.strip()
+    return s.startswith("|") and s.count("|") >= 2
+
+
+def _is_sep_row(s):
+    """'|---|:--:|' 같은 구분선인가."""
+    body = s.strip().strip("|")
+    cells = body.split("|")
+    return bool(cells) and all(("-" in c and set(c.strip()) <= set("-: ")) for c in cells if c.strip() != "") \
+        and any("-" in c for c in cells)
+
+
+def _split_row(s):
+    """표 행을 셀 리스트로. 앞뒤 파이프 제거 후 분리."""
+    s = s.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    # 이스케이프된 파이프(\|)는 셀 내부 문자로 복원
+    parts, buf, i = [], [], 0
+    while i < len(s):
+        if s[i] == "\\" and i + 1 < len(s) and s[i + 1] == "|":
+            buf.append("|"); i += 2; continue
+        if s[i] == "|":
+            parts.append("".join(buf)); buf = []; i += 1; continue
+        buf.append(s[i]); i += 1
+    parts.append("".join(buf))
+    return [c.strip() for c in parts]
+
+
+def _table_block(rows, has_header=True):
+    """rows: list[list[str]] → Notion table 블록(행은 자식으로 인라인)."""
+    width = max((len(r) for r in rows), default=1) or 1
+
+    def cell(txt):
+        return [{"type": "text", "text": {"content": (txt or "")[:2000]}}]
+
+    def row(cells):
+        cells = (list(cells) + [""] * width)[:width]
+        return {"object": "block", "type": "table_row",
+                "table_row": {"cells": [cell(c) for c in cells]}}
+
+    return {"object": "block", "type": "table", "table": {
+        "table_width": width,
+        "has_column_header": bool(has_header),
+        "has_row_header": False,
+        "children": [row(r) for r in rows],
+    }}
+
+
+def _md_to_blocks(md, cap=95):
+    lines = (md or "").splitlines()
     blocks = []
-    for line in (md or "").splitlines():
-        s = line.rstrip()
+    i, n = 0, len(lines)
+    while i < n:
+        s = lines[i].rstrip()
         if not s:
+            i += 1
+            continue
+        # 표 감지: 현재 줄이 표 행이고, (다음 줄이 구분선) 또는 (다음 줄도 표 행)
+        if _is_table_row(s) and i + 1 < n and (
+                _is_sep_row(lines[i + 1]) or _is_table_row(lines[i + 1])):
+            rows = []
+            while i < n and _is_table_row(lines[i]):
+                if not _is_sep_row(lines[i]):
+                    rows.append(_split_row(lines[i]))
+                i += 1
+            if rows:
+                blocks.append(_table_block(rows, has_header=True))
+                if cap and len(blocks) >= cap:
+                    break
             continue
         if s.startswith("### "):
             b = {"heading_3": {"rich_text": _rt(s[4:])}}
@@ -156,9 +245,15 @@ def _md_to_blocks(md):
         else:
             b = {"paragraph": {"rich_text": _rt(s)}}
         blocks.append({"object": "block", "type": list(b)[0], **b})
-        if len(blocks) >= 95:
+        i += 1
+        if cap and len(blocks) >= cap:
             break
     return blocks
+
+
+def _md_to_blocks_full(md):
+    """캡 없이 전체 변환(retrofit·재구성용)."""
+    return _md_to_blocks(md, cap=None)
 
 
 def _detail_header(r):
@@ -175,12 +270,14 @@ def _detail_header(r):
     )
 
 
-def cmd_add(report_path, month=None):
+def cmd_add(report_path, bucket=None, month=None):
     r = json.load(open(report_path, encoding="utf-8")) if report_path != "-" else json.load(sys.stdin)
-    month = month or (r.get("date") or "")[:7]
-    if not month or len(month) != 7:
-        sys.stderr.write("❌ 월(YYYY-MM)을 결정할 수 없음. report.date 또는 --month 필요.\n"); sys.exit(1)
-    _, db_id = _ensure_month(month)
+    # 라우팅 키: --bucket(사이클 등) 우선 → --month → report.date의 월
+    if not bucket:
+        bucket = month or (r.get("date") or "")[:7]
+        if not bucket or len(bucket) != 7:
+            sys.stderr.write("❌ 버킷을 결정할 수 없음. --bucket(사이클) 또는 --month(YYYY-MM) 또는 report.date 필요.\n"); sys.exit(1)
+    _, db_id = _ensure_bucket(bucket)
 
     props = {
         "종목명": {"title": _rt(r.get("name", "?"))},
@@ -194,23 +291,29 @@ def cmd_add(report_path, month=None):
     d = _api("POST", "/pages", {"parent": {"database_id": db_id},
                                 "properties": props, "children": _md_to_blocks(body_md)})
     if d.get("id"):
-        print(f"✅ 등록: {r.get('name')} [{month}] → {d['id']}")
+        print(f"✅ 등록: {r.get('name')} [{bucket}] → {d['id']}")
     else:
         sys.stderr.write("❌ 등록 실패.\n"); sys.exit(1)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Notion 발행기 (월별 페이지 + 최소 컬럼)")
+    ap = argparse.ArgumentParser(description="Notion 발행기 (사이클/월 버킷 페이지 + 최소 컬럼)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     fp = sub.add_parser("find-page"); fp.add_argument("query")
     sr = sub.add_parser("set-root"); sr.add_argument("page_id")
+    # ensure-bucket(신규) + ensure-month(back-compat 별칭)
+    eb = sub.add_parser("ensure-bucket"); eb.add_argument("bucket")
     em = sub.add_parser("ensure-month"); em.add_argument("month")
-    ad = sub.add_parser("add"); ad.add_argument("report"); ad.add_argument("--month")
+    ab = sub.add_parser("archive-bucket"); ab.add_argument("bucket")
+    ad = sub.add_parser("add"); ad.add_argument("report")
+    ad.add_argument("--bucket"); ad.add_argument("--month")
     a = ap.parse_args()
     {"find-page": lambda: cmd_find_page(a.query),
      "set-root": lambda: cmd_set_root(a.page_id),
-     "ensure-month": lambda: cmd_ensure_month(a.month),
-     "add": lambda: cmd_add(a.report, a.month)}[a.cmd]()
+     "ensure-bucket": lambda: cmd_ensure_bucket(a.bucket),
+     "ensure-month": lambda: cmd_ensure_bucket(a.month),
+     "archive-bucket": lambda: cmd_archive_bucket(a.bucket),
+     "add": lambda: cmd_add(a.report, a.bucket, a.month)}[a.cmd]()
 
 
 if __name__ == "__main__":

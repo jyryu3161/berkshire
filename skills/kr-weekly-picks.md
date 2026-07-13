@@ -75,15 +75,19 @@ python3 tools/kr_deep_queue.py next --n 5
   **기술적 분석 표(월봉·주봉: 국면·현재위치·이평이격·진입타이밍) + 월봉 차트**,
   실패 시나리오, 데이터 교차검증표. (모든 표는 마크다운 파이프표로 작성 → notion_publish가 자동으로 Notion 표로 렌더링.)
 
-### 4. 각 리포트 Notion 등록
-종목별로 report.json 을 만들어 발행한다:
+### 4. 각 리포트 Notion 등록 (사이클별 정리)
+종목별로 report.json 을 만들어 **현재 사이클 버킷**으로 발행한다.
+Notion은 월이 아닌 **사이클 단위**로 페이지·DB가 묶인다(12주 사이클 = 페이지 1개, 3개월로 쪼개지지 않음):
 ```bash
-python3 tools/notion_publish.py add <report.json>
+BUCKET="$(python3 tools/kr_deep_queue.py label)"   # 예: '사이클 2 (2026-07~)'
+python3 tools/notion_publish.py add <report.json> --bucket "$BUCKET"
 ```
 report.json 필드: name, code, market, score(종합 5점), verdict(매수|보류|관망|제외),
 one_liner, s_biz/s_fin/s_ind/s_risk(각 대가 ★), gross_margin, ocf_ni, fcf_eok,
 date(YYYY-MM-DD), body_md(한국어 리포트 전문).
-(DB가 없으면 `notion_publish.py ensure-db <경제분석_page_id>` 먼저. page_id는 data/notion_db.json 에 캐시됨.)
+- `--bucket` 미지정 시 `--month`(YYYY-MM) 또는 report.date의 월로 폴백(back-compat).
+- 루트 미지정 시 `notion_publish.py set-root <경제분석_page_id>` 먼저. 상태는 data/notion_db.json 캐시.
+- 버킷 페이지 정리: `notion_publish.py archive-bucket <버킷명>` (휴지통 이동).
 
 ### 5. 완료 표시
 ```bash

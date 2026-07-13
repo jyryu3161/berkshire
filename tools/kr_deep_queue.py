@@ -20,6 +20,7 @@ Python >= 3.8.
 """
 
 import argparse
+import datetime
 import json
 import os
 import sys
@@ -79,9 +80,30 @@ def cmd_status():
         print("→ 한 사이클 완료. 재스크리닝 후 reset 하세요.")
 
 
+def _started(st):
+    """사이클 시작일(YYYY-MM-DD). 없으면 유니버스 생성일 → 오늘 순으로 폴백."""
+    s = st.get("started")
+    if s:
+        return s
+    if os.path.exists(_UNIVERSE):
+        try:
+            return json.load(open(_UNIVERSE, encoding="utf-8")).get("built") \
+                or datetime.date.today().isoformat()
+        except Exception:
+            pass
+    return datetime.date.today().isoformat()
+
+
+def cmd_label():
+    """Notion 라우팅용 사이클 버킷 라벨. 예: '사이클 2 (2026-07~)'."""
+    st = _state()
+    print(f"사이클 {st.get('cycle', 1)} ({_started(st)[:7]}~)")
+
+
 def cmd_reset():
     st = _state()
-    _save({"done": [], "cycle": st.get("cycle", 1) + 1})
+    _save({"done": [], "cycle": st.get("cycle", 1) + 1,
+           "started": datetime.date.today().isoformat()})
     print(f"✅ 큐 초기화 → 사이클 {st.get('cycle',1)+1}")
 
 
@@ -90,10 +112,10 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     n = sub.add_parser("next"); n.add_argument("--n", type=int, default=5)
     m = sub.add_parser("mark"); m.add_argument("codes")
-    sub.add_parser("status"); sub.add_parser("reset")
+    sub.add_parser("status"); sub.add_parser("reset"); sub.add_parser("label")
     a = ap.parse_args()
     {"next": lambda: cmd_next(a.n), "mark": lambda: cmd_mark(a.codes),
-     "status": cmd_status, "reset": cmd_reset}[a.cmd]()
+     "status": cmd_status, "reset": cmd_reset, "label": cmd_label}[a.cmd]()
 
 
 if __name__ == "__main__":
