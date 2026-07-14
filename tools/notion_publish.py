@@ -24,6 +24,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 _KST = datetime.timezone(datetime.timedelta(hours=9))
 
@@ -156,6 +157,140 @@ def cmd_archive_bucket(bucket):
     del c["months"][bucket]
     _save_cfg(c)
     print(f"✅ 아카이브: {bucket} (page {page_id[:8]}… 휴지통 이동)")
+
+
+# ── 버킷 병합 (Notion→Notion 행+본문 복사) ─────────────────────────
+_CONTAINER = {"table", "column_list", "column", "toggle", "callout",
+              "quote", "bulleted_list_item", "numbered_list_item",
+              "paragraph", "synced_block", "template", "to_do"}
+
+
+def _clean_rt(rts):
+    """rich_text 배열을 생성 가능한 최소형으로 정리(읽기전용 필드 제거)."""
+    out = []
+    for x in rts or []:
+        if x.get("type", "text") == "text" and x.get("text"):
+            item = {"type": "text",
+                    "text": {"content": x["text"].get("content", "")}}
+            if x["text"].get("link"):
+                item["text"]["link"] = x["text"]["link"]
+        else:  # mention/equation → plain_text로 대체
+            item = {"type": "text", "text": {"content": x.get("plain_text", "")}}
+        ann = x.get("annotations")
+        if ann:
+            item["annotations"] = {k: ann[k] for k in
+                ("bold", "italic", "strikethrough", "underline", "code", "color")
+                if k in ann}
+        out.append(item)
+    return out
+
+
+def _strip_nulls(o):
+    """Notion 생성 API는 명시적 null을 거부 → dict에서 None 값 키 재귀 제거."""
+    if isinstance(o, dict):
+        return {k: _strip_nulls(v) for k, v in o.items() if v is not None}
+    if isinstance(o, list):
+        return [_strip_nulls(x) for x in o]
+    return o
+
+
+def _get_children(block_id):
+    """블록 자식 전체(페이지네이션)."""
+    kids, cur = [], None
+    while True:
+        q = f"/blocks/{block_id}/children?page_size=100"
+        if cur:
+            q += f"&start_cursor={cur}"
+        d = _api("GET", q)
+        kids += d.get("results", [])
+        if not d.get("has_more"):
+            break
+        cur = d.get("next_cursor")
+        time.sleep(0.2)
+    return kids
+
+
+def _sanitize_block(b, depth=0):
+    """GET 블록 → 생성 가능한 블록으로 정리(자식은 depth<2까지 재귀 임베드)."""
+    t = b.get("type")
+    if not t or t in ("unsupported", "child_page", "child_database"):
+        return None
+    p = dict(b.get(t, {}) or {})
+    p.pop("children", None)
+    # 미디어(image/file/…): 외부 URL만 재생성 가능. Notion 호스팅(만료 URL)은 스킵.
+    if t in ("image", "file", "video", "pdf", "audio"):
+        if p.get("type") == "external" and p.get("external", {}).get("url"):
+            p = {"type": "external", "external": {"url": p["external"]["url"]}}
+        else:
+            return None
+    if "rich_text" in p:
+        p["rich_text"] = _clean_rt(p["rich_text"])
+    if t == "table_row" and "cells" in p:
+        p["cells"] = [_clean_rt(c) for c in p["cells"]]
+    if b.get("has_children") and t in _CONTAINER and depth < 2:
+        kids = [_sanitize_block(k, depth + 1) for k in _get_children(b["id"])]
+        kids = [k for k in kids if k]
+        if kids:
+            p["children"] = kids
+    return {"object": "block", "type": t, t: _strip_nulls(p)}
+
+
+def _props_for_copy(page):
+    P = page.get("properties", {})
+    def _txt(name, kind):
+        return "".join(x.get("plain_text", "") for x in P.get(name, {}).get(kind, []))
+    out = {"종목명": {"title": _rt(_txt("종목명", "title") or "?")},
+           "종합점수": {"number": P.get("종합점수", {}).get("number")},
+           "한줄의견": {"rich_text": _rt(_txt("한줄의견", "rich_text"))}}
+    sel = P.get("종합의견", {}).get("select")
+    if sel and sel.get("name"):
+        out["종합의견"] = {"select": {"name": sel["name"]}}
+    dt = P.get("분석일", {}).get("date")
+    if dt and dt.get("start"):
+        out["분석일"] = {"date": {"start": dt["start"]}}
+    return out
+
+
+def cmd_migrate_bucket(src, dst):
+    """src 버킷 DB의 모든 행(속성+본문)을 dst 버킷 DB로 복사. src는 남겨둠(별도 archive)."""
+    c = _cfg()
+    if src not in c["months"]:
+        sys.stderr.write(f"❌ 원본 버킷 없음: {src}\n"); sys.exit(1)
+    src_db = c["months"][src]["db_id"]
+    _, dst_db = _ensure_bucket(dst)
+    # src DB 행 수집(페이지네이션)
+    rows, cur = [], None
+    while True:
+        body = {"page_size": 100}
+        if cur:
+            body["start_cursor"] = cur
+        d = _api("POST", f"/databases/{src_db}/query", body)
+        rows += d.get("results", [])
+        if not d.get("has_more"):
+            break
+        cur = d.get("next_cursor"); time.sleep(0.3)
+    print(f"  원본 {src}: {len(rows)}행 → {dst} 로 복사")
+    ok = 0
+    for i, page in enumerate(rows, 1):
+        props = _props_for_copy(page)
+        name = "".join(x.get("plain_text", "")
+                       for x in page.get("properties", {}).get("종목명", {}).get("title", []))
+        children = [b for b in
+                    (_sanitize_block(k) for k in _get_children(page["id"])) if b]
+        first, rest = children[:100], children[100:]
+        pg = _api("POST", "/pages", {"parent": {"database_id": dst_db},
+                                     "properties": props, "children": first})
+        pid = pg.get("id")
+        if not pid:
+            sys.stderr.write(f"  ⚠️ 실패: {name}\n"); continue
+        j = 0
+        while j < len(rest):
+            _api("PATCH", f"/blocks/{pid}/children", {"children": rest[j:j+100]})
+            j += 100; time.sleep(0.35)
+        ok += 1
+        print(f"  [{i}/{len(rows)}] ✅ {name} ({len(children)}블록)")
+        time.sleep(0.4)
+    print(f"✅ 병합 완료: {ok}/{len(rows)}행 → {dst}")
 
 
 # ── 마크다운 표 → Notion table 블록 ─────────────────────────────
@@ -305,6 +440,7 @@ def main():
     eb = sub.add_parser("ensure-bucket"); eb.add_argument("bucket")
     em = sub.add_parser("ensure-month"); em.add_argument("month")
     ab = sub.add_parser("archive-bucket"); ab.add_argument("bucket")
+    mb = sub.add_parser("migrate-bucket"); mb.add_argument("src"); mb.add_argument("dst")
     ad = sub.add_parser("add"); ad.add_argument("report")
     ad.add_argument("--bucket"); ad.add_argument("--month")
     a = ap.parse_args()
@@ -313,6 +449,7 @@ def main():
      "ensure-bucket": lambda: cmd_ensure_bucket(a.bucket),
      "ensure-month": lambda: cmd_ensure_bucket(a.month),
      "archive-bucket": lambda: cmd_archive_bucket(a.bucket),
+     "migrate-bucket": lambda: cmd_migrate_bucket(a.src, a.dst),
      "add": lambda: cmd_add(a.report, a.bucket, a.month)}[a.cmd]()
 
 
