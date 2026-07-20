@@ -85,16 +85,20 @@ def cmd_status():
 def cmd_plan(base, cap):
     """이번 실행의 처리 개수 N을 밀림 보정하여 산출.
 
-    누적 목표(target)에 매 실행마다 base(기본 5)를 더하고, 아직 못 채운 만큼
-    (target-done)을 cap(기본 10) 이내에서 처리한다. 어떤 날 실패해 done이 안
-    늘면 backlog이 쌓여 다음 날 N이 커져(상한 cap) 밀린 분을 이어서 따라잡는다.
+    누적 목표(target)에 **하루 1회만** base(기본 5)를 더한다(같은 날 중복 호출은
+    증가 없음 — 헤드리스 세션이 plan을 또 불러도 target이 부풀지 않게 멱등화).
+    아직 못 채운 만큼(target-done)을 cap(기본 10) 이내에서 처리한다. 어떤 날
+    실패해 done이 안 늘면 backlog이 쌓여 다음 날 N이 커져(상한 cap) 따라잡는다.
     target은 상태파일에 누적 저장. reset(새 사이클) 시 0으로 초기화.
     """
     st = _state()
     done = len(st["done"])
-    st["target"] = st.get("target", done) + base   # 이번 실행 몫 누적
-    _save(st)
-    n = min(cap, max(0, st["target"] - done))
+    today = datetime.date.today().isoformat()
+    if st.get("target_date") != today:          # 날짜당 1회만 증가
+        st["target"] = st.get("target", done) + base
+        st["target_date"] = today
+        _save(st)
+    n = min(cap, max(0, st.get("target", done) - done))
     print(n)
 
 
@@ -121,7 +125,8 @@ def cmd_label():
 def cmd_reset():
     st = _state()
     _save({"done": [], "cycle": st.get("cycle", 1) + 1,
-           "started": datetime.date.today().isoformat(), "target": 0})
+           "started": datetime.date.today().isoformat(),
+           "target": 0, "target_date": None})
     print(f"✅ 큐 초기화 → 사이클 {st.get('cycle',1)+1}")
 
 
