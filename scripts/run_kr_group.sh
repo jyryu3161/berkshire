@@ -19,7 +19,8 @@ if [ -n "$START" ] && [ "$(date +%F)" \< "$START" ]; then
   exit 0
 fi
 
-N="${1:-10}"
+BASE="${1:-5}"          # 하루 기본 몫(밀림 없으면 이만큼). 실제 N은 plan이 밀림 보정.
+CAP="${KR_DAILY_CAP:-10}"  # 한 실행 최대 처리(밀림 따라잡기 상한)
 BUCKET_ARG="${2:-cycle}"
 RESCREEN="${3:-0}"
 # 2번째 인자: cycle=현재 사이클 라벨(기본, Notion을 사이클별로 정리), auto=오늘의 월, YYYY-MM 직접지정
@@ -32,18 +33,19 @@ resolve_bucket() {
 }
 BUCKET="$(resolve_bucket)"
 
-echo "===== [$(date '+%F %T %Z')] 그룹 시작 N=$N bucket=$BUCKET rescreen=$RESCREEN =====" >>"$LOG"
-
 rescreen() {
   echo "  재스크리닝 중 (召回池·去劣·유니버스300·큐리셋)..." >>"$LOG"
   python3 tools/kr_recall_pool.py build --kospi 200 --kosdaq 150 >>"$LOG" 2>&1
   python3 tools/kr_quality_screen.py run  >>"$LOG" 2>&1
   python3 tools/kr_quality_screen2.py run >>"$LOG" 2>&1
   python3 tools/kr_universe.py build --n 300 >>"$LOG" 2>&1
-  python3 tools/kr_deep_queue.py reset    >>"$LOG" 2>&1
+  python3 tools/kr_deep_queue.py reset    >>"$LOG" 2>&1   # target(밀림) 0으로 초기화
   date +%Y-%m > "$REPO/data/kr_active_month.txt"
   BUCKET="$(resolve_bucket)"   # 새 사이클 → 라벨 갱신
 }
+
+# 이번 실행 N: 밀림 보정(plan). 어제 실패 등으로 backlog 있으면 CAP 내에서 더 처리해 따라잡음.
+plan_n() { python3 tools/kr_deep_queue.py plan --base "$BASE" --cap "$CAP"; }
 
 fetch_codes() {
   python3 tools/kr_deep_queue.py next --n "$N" \
@@ -52,12 +54,16 @@ fetch_codes() {
 
 [ "$RESCREEN" = "1" ] && rescreen
 
+N="$(plan_n)"
+echo "===== [$(date '+%F %T %Z')] 그룹 시작 N=$N (base=$BASE cap=$CAP) bucket=$BUCKET rescreen=$RESCREEN =====" >>"$LOG"
+
 # 이번 배치 종목코드 추출 (아직 처리 안 된 상위 N)
 CODES=$(fetch_codes)
-# 큐 소진(300종목 12주 사이클 완료) → 자동 재스크리닝 후 재시도(무한루프 방지: 1회)
+# 큐 소진(300종목 사이클 완료) → 자동 재스크리닝 후 재시도(무한루프 방지: 1회)
 if [ -z "$CODES" ]; then
   echo "  큐 비어있음 — 사이클 완료. 자동 재스크리닝 후 새 사이클 시작." >>"$LOG"
-  rescreen   # 내부에서 BUCKET 갱신
+  rescreen   # 내부에서 BUCKET 갱신 + target 0
+  N="$(plan_n)"
   CODES=$(fetch_codes)
 fi
 if [ -z "$CODES" ]; then

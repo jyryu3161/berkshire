@@ -74,10 +74,28 @@ def cmd_mark(codes):
 def cmd_status():
     st = _state()
     total = len(_pass_list())
-    remaining = total - len(st["done"])
-    print(f"사이클 {st['cycle']} · 처리 {len(st['done'])}/{total} · 남음 {remaining}")
+    done = len(st["done"])
+    remaining = total - done
+    backlog = max(0, st.get("target", done) - done)
+    print(f"사이클 {st['cycle']} · 처리 {done}/{total} · 남음 {remaining} · 밀림(backlog) {backlog}")
     if remaining == 0:
         print("→ 한 사이클 완료. 재스크리닝 후 reset 하세요.")
+
+
+def cmd_plan(base, cap):
+    """이번 실행의 처리 개수 N을 밀림 보정하여 산출.
+
+    누적 목표(target)에 매 실행마다 base(기본 5)를 더하고, 아직 못 채운 만큼
+    (target-done)을 cap(기본 10) 이내에서 처리한다. 어떤 날 실패해 done이 안
+    늘면 backlog이 쌓여 다음 날 N이 커져(상한 cap) 밀린 분을 이어서 따라잡는다.
+    target은 상태파일에 누적 저장. reset(새 사이클) 시 0으로 초기화.
+    """
+    st = _state()
+    done = len(st["done"])
+    st["target"] = st.get("target", done) + base   # 이번 실행 몫 누적
+    _save(st)
+    n = min(cap, max(0, st["target"] - done))
+    print(n)
 
 
 def _started(st):
@@ -103,7 +121,7 @@ def cmd_label():
 def cmd_reset():
     st = _state()
     _save({"done": [], "cycle": st.get("cycle", 1) + 1,
-           "started": datetime.date.today().isoformat()})
+           "started": datetime.date.today().isoformat(), "target": 0})
     print(f"✅ 큐 초기화 → 사이클 {st.get('cycle',1)+1}")
 
 
@@ -112,9 +130,12 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     n = sub.add_parser("next"); n.add_argument("--n", type=int, default=5)
     m = sub.add_parser("mark"); m.add_argument("codes")
+    pl = sub.add_parser("plan"); pl.add_argument("--base", type=int, default=5)
+    pl.add_argument("--cap", type=int, default=10)
     sub.add_parser("status"); sub.add_parser("reset"); sub.add_parser("label")
     a = ap.parse_args()
     {"next": lambda: cmd_next(a.n), "mark": lambda: cmd_mark(a.codes),
+     "plan": lambda: cmd_plan(a.base, a.cap),
      "status": cmd_status, "reset": cmd_reset, "label": cmd_label}[a.cmd]()
 
 
