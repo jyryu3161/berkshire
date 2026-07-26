@@ -66,7 +66,7 @@ python3 tools/kr_deep_queue.py next --n 5
     (성장·일반주 기본). 금융·자산주는 `pbr`, 설비집약·고감가주는 `ev-ebitda` 병행.
   - RIM(잔여이익, 가치투자 핵심·왜곡 최소): `python3 tools/valuation.py rim --bps {BPS} --roe {지속가능ROE} --coe {자기자본비용≈무위험+β프리미엄} --growth {영구g} --years 5 --current {현재가}`
   - DCF(현금흐름 안정 성숙기업): `python3 tools/valuation.py dcf --fcf-ps {주당FCF} --wacc {할인율} --g1 {예측기성장} --years 5 --g-term {영구성장} --current {현재가}`
-  - 종합 교차검증(상/중/하 3밴드 표 생성): 가용 방식을 JSON에 담아 `python3 tools/valuation.py target --config {종목}_val.json --md`,
+  - 종합 교차검증(상/중/하 3밴드 표 생성): 가용 방식을 JSON에 담아 `python3 tools/valuation.py target --config data/kr_work/{코드}_val.json --md`,
     출력 마크다운 표를 리포트의 **"목표주가 교차검증"** 섹션에 그대로 삽입.
   - 원칙: 최소 2방식 교차, 가중평균=중립 목표가·최소값=보수 매수기준선. 데이터 부족(FCF 등)은 공란·임의추정 금지(GIGO).
     타깃PER·WACC·COE·g 등 모든 가정을 리포트에 투명 표기.
@@ -77,10 +77,12 @@ python3 tools/kr_deep_queue.py next --n 5
 
 ### 4. 각 리포트 Notion 등록 (사이클별 정리)
 종목별로 report.json 을 만들어 **현재 사이클 버킷**으로 발행한다.
+**중간·산출 파일은 반드시 `data/kr_work/` 아래**에 종목코드 접두로 만든다(루트에 파일 생성 금지):
+`data/kr_work/{코드}_report.json`, `{코드}_val.json`(밸류 설정), `{코드}_bull.json`/`{코드}_bear.json`(시나리오) 등. (`data/kr_work/`는 gitignore.)
 Notion은 월이 아닌 **사이클 단위**로 페이지·DB가 묶인다(12주 사이클 = 페이지 1개, 3개월로 쪼개지지 않음):
 ```bash
 BUCKET="$(python3 tools/kr_deep_queue.py label)"   # 예: '사이클 2 (2026-07~)'
-python3 tools/notion_publish.py add <report.json> --bucket "$BUCKET"
+python3 tools/notion_publish.py add data/kr_work/{코드}_report.json --bucket "$BUCKET"
 ```
 report.json 필드: name, code, market, score(종합 5점), verdict(매수|보류|관망|제외),
 one_liner, s_biz/s_fin/s_ind/s_risk(각 대가 ★), gross_margin, ocf_ni, fcf_eok,

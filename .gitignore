@@ -36,3 +36,6 @@ data/notion_db.json
 data/kr_deep_queue.json
 data/_report_*.json
 data/kr_active_month.txt
+
+# KR 파이프라인 종목별 중간 작업 파일(코드_report/val/bull/bear, build 스크립트)
+data/kr_work/
