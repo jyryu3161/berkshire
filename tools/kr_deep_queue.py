@@ -33,6 +33,11 @@ _LEDGER = os.path.join(_ROOT, "local", "trading", "ledger.sqlite3")
 # 보유 종목 재분석 보장 주기(일). 신호 유효기간 90일 전에 넉넉히 갱신되도록
 # 8주로 잡는다 — 이보다 오래된 보유 종목은 done 여부와 무관하게 재분석한다.
 _HELD_REFRESH_DAYS = 56
+# 워치리스트: 직전 판정이 관망/보류인 종목이 보수(bear) 밴드에 근접하면
+# 큐 순서를 기다리지 않고 재분석해 매수 기회를 놓치지 않는다.
+_WATCH_NEAR_BEAR = 1.05      # 현재가 ≤ bear × 1.05 이면 근접으로 판정
+_WATCH_MIN_AGE_DAYS = 14     # 직후 재분석 공회전 방지
+_WATCH_MAX_PER_BATCH = 2     # 사이클 순환을 밀어내지 않도록 상한
 
 
 def _pass_list():
@@ -99,16 +104,75 @@ def _held_first():
         db.close()
 
 
+def _close_price(code):
+    """네이버 basic API 종가(무키). 실패 시 0 — 해당 종목은 이번 판정 생략."""
+    try:
+        import krx_data
+        d = krx_data._curl_json(
+            f"https://m.stock.naver.com/api/stock/{code}/basic",
+            f"https://m.stock.naver.com/domestic/stock/{code}/total",
+        )
+        return int(str(d.get("closePrice", "")).replace(",", "") or 0)
+    except Exception:
+        return 0
+
+
+def _watch_first(exclude):
+    """관망/보류 판정이 보수(bear) 밴드에 근접한 종목을 앞순위 재분석.
+
+    직전 verdict가 매수가 아니면 가격이 매수선까지 떨어져도 신호가 갱신될
+    때까지 매매가 없다. 그 공백을 메우기 위해 원장의 최신 신호 중
+    WATCH/HOLD + 밴드 보유 + 분석 14일 경과 종목의 현재가를 확인해,
+    bear×1.05 이하면 배치 앞쪽에 최대 2개까지 끼워 넣는다.
+    """
+    if not os.path.exists(_LEDGER):
+        return []
+    import sqlite3
+    db = sqlite3.connect(f"file:{_LEDGER}?mode=ro", uri=True)
+    try:
+        candidates = []
+        for code, payload, analyzed_at in db.execute(
+            "SELECT code, payload, MAX(analyzed_at) FROM signals GROUP BY code"
+        ).fetchall():
+            if code in exclude:
+                continue
+            signal = json.loads(payload)
+            targets = signal.get("targets_krw")
+            if signal.get("verdict") not in ("WATCH", "HOLD") or not targets:
+                continue
+            try:
+                analyzed = datetime.date.fromisoformat(str(analyzed_at)[:10])
+            except (ValueError, TypeError):
+                continue
+            if (datetime.date.today() - analyzed).days < _WATCH_MIN_AGE_DAYS:
+                continue
+            price = _close_price(code)
+            bear = int(targets.get("bear") or 0)
+            if not price or not bear or price > bear * _WATCH_NEAR_BEAR:
+                continue
+            candidates.append((price / bear, {
+                "code": code, "name": signal.get("name", code),
+                "market": signal.get("market", "KOSPI"),
+                "score": None, "watch": True,
+            }))
+        candidates.sort(key=lambda pair: pair[0])   # 할인 깊은 순
+        return [entry for _, entry in candidates[:_WATCH_MAX_PER_BATCH]]
+    finally:
+        db.close()
+
+
 def cmd_next(n):
     st = _state()
     done = set(st["done"])
     held = _held_first()
     held_codes = {h["code"] for h in held}
+    watch = _watch_first(held_codes)
+    front_codes = held_codes | {w["code"] for w in watch}
     rest = [{"code": r["code"], "name": r["name"], "market": r["market"],
              "score": r.get("score")}
             for r in _pass_list()
-            if r["code"] not in done and r["code"] not in held_codes]
-    print(json.dumps((held + rest)[:n], ensure_ascii=False, indent=2))
+            if r["code"] not in done and r["code"] not in front_codes]
+    print(json.dumps((held + watch + rest)[:n], ensure_ascii=False, indent=2))
 
 
 def cmd_mark(codes):

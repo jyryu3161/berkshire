@@ -93,7 +93,9 @@ def build_trade_signal(report: dict, body_md: str, cycle_id: str) -> dict | None
         "sector": sector,
         "analyzed_at": now.isoformat(),
         "verdict": verdict,
-        "targets_krw": targets if verdict == "BUY" else None,
+        # BUY가 아니어도 밴드가 있으면 실어 보낸다 — 관망/보류 종목이 보수(bear)
+        # 밴드에 근접했는지 큐 워치리스트가 가격 비교하는 데 쓴다.
+        "targets_krw": targets,
         "source_hash": hashlib.sha256(body_md.encode("utf-8")).hexdigest(),
         "audit_status": "PASS",
     }
