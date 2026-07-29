@@ -574,6 +574,21 @@ def cmd_add(report_path, bucket=None, month=None):
         if rest:
             _append_chunked(d["id"], rest)
         print(f"✅ 등록: {r.get('name')} [{bucket}] → {d['id']} ({len(blocks)}블록)")
+        # 구조화 sidecar만 best-effort로 전달한다. 실패해도 연구 발행 성공은 유지한다.
+        if r.get("trade_signal") and report_path != "-":
+            exporter = os.path.join(_ROOT, "trading", ".venv", "bin", "python")
+            module = "ai_berkshire_trading.export_signal"
+            if os.path.exists(exporter):
+                exported = subprocess.run(
+                    [exporter, "-m", module, report_path, d["id"]],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if exported.returncode:
+                    sys.stderr.write(f"⚠️ 거래 신호 export 실패(연구 발행은 완료): {exported.stderr.strip()}\n")
+            else:
+                sys.stderr.write("⚠️ 거래 환경 미설치: trade_signal export 생략(연구 발행은 완료)\n")
+        elif r.get("trade_signal"):
+            sys.stderr.write("⚠️ stdin 보고서는 재독립 검증할 수 없어 trade_signal export 생략(연구 발행은 완료)\n")
     else:
         sys.stderr.write("❌ 등록 실패.\n"); sys.exit(1)
 

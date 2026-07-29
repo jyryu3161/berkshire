@@ -1,0 +1,27 @@
+[project]
+name = "ai-berkshire-trading"
+version = "0.1.0"
+description = "Fail-closed Korean equity execution boundary for AI Berkshire"
+requires-python = ">=3.12,<3.13"
+license = {text = "GPL-3.0-only"}
+dependencies = [
+  "cvxportfolio==1.5.1",
+  "httpx>=0.27,<1",
+]
+
+[project.scripts]
+ai-berkshire-trading = "ai_berkshire_trading.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8,<9"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ai_berkshire_trading"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

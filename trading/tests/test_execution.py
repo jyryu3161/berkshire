@@ -1,0 +1,222 @@
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+
+import pytest
+
+from ai_berkshire_trading.broker import BrokerFill, OrderOutcome, Quote
+from ai_berkshire_trading.config import CapitalMode, StrategyConfig
+from ai_berkshire_trading.execution import ExecutionEngine, build_plan
+from ai_berkshire_trading.ledger import Ledger
+from ai_berkshire_trading.models import Verdict
+
+
+def test_stale_signal_freezes_instead_of_selling(signal):
+    old = signal(analyzed_at=datetime.now(timezone.utc) - timedelta(days=121))
+    plan = build_plan([old], {"021240": 80_000}, {"021240": 7}, 10_000_000, datetime.now(timezone.utc))
+    assert plan[0].frozen
+    assert plan[0].target_qty == 7
+
+
+def test_explicit_nonbuy_targets_zero(signal):
+    hold = signal(verdict=Verdict.HOLD, targets_krw=None)
+    plan = build_plan([hold], {"021240": 50_000}, {"021240": 7}, 10_000_000, datetime.now(timezone.utc))
+    assert not plan[0].frozen
+    assert plan[0].target_qty == 0
+
+
+def test_target_quantity_tracks_available_balance(signal):
+    now = datetime.now(timezone.utc)
+    small = build_plan([signal()], {"021240": 50_000}, {"021240": 0}, 1_000_000, now)
+    large = build_plan([signal()], {"021240": 50_000}, {"021240": 0}, 2_000_000, now)
+    reduced = build_plan([signal()], {"021240": 50_000}, {"021240": 0}, 500_000, now)
+    assert (reduced[0].target_qty, small[0].target_qty, large[0].target_qty) == (3, 6, 12)
+
+
+def test_manual_same_name_reduces_strategy_target(signal):
+    plan = build_plan(
+        [signal()], {"021240": 50_000}, {"021240": 0}, 1_000_000,
+        datetime.now(timezone.utc), account_owned={"021240": 2},
+    )
+    # 30% account target is 6 shares; two manual shares are retained.
+    assert plan[0].target_qty == 4
+
+
+def test_sector_cap_scales_two_names(signal):
+    second = signal(
+        analysis_id="a-2", code="271560", name="오리온", sector="필수소비재"
+    )
+    plan = build_plan(
+        [signal(), second], {"021240": 50_000, "271560": 50_000},
+        {}, 1_000_000, datetime.now(timezone.utc),
+    )
+    # Combined raw 60% is reduced to the 35% sector ceiling.
+    assert [item.target_qty for item in plan] == [3, 3]
+
+
+def test_frozen_and_missing_positions_reserve_equity_budget(signal):
+    active = signal(analysis_id="a-2", code="271560", name="오리온")
+    plan = build_plan(
+        [active], {"271560": 50_000, "005930": 50_000},
+        {"005930": 10}, 1_000_000, datetime.now(timezone.utc),
+        account_owned={"005930": 10},
+    )
+    # A missing-signal 50% holding leaves only 20% under the 70% equity cap.
+    assert plan[0].target_qty == 4
+
+
+class _Logger:
+    def __init__(self):
+        self.events = []
+
+    def preflight(self, run_id, message):
+        return True
+
+    def event(self, run_id, event, detail):
+        self.events.append((event, detail))
+
+
+class _Broker:
+    def __init__(self, partial_sell, partial_status="PARTIAL"):
+        self.positions = {"021240": 2}
+        self.cash = 900_000
+        self.partial_sell = partial_sell
+        self.partial_status = partial_status
+        self.requests = []
+
+    def market_is_open(self): return True
+    def account_positions(self): return dict(self.positions)
+    def orderable_cash(self): return self.cash
+    def open_orders(self): return []
+    def find_order(self, idempotency_key): return None
+    def cancel_strategy_order(self, broker_order_ref): raise AssertionError
+    def quote(self, code): return Quote(code, 50_000, 49_900, 50_000, "now")
+
+    def submit(self, order):
+        self.requests.append(order)
+        return f"ref-{len(self.requests)}"
+
+    def wait_for_orders(self, refs, timeout_seconds):
+        outcomes = []
+        for ref in refs:
+            request = self.requests[int(ref.split("-")[1]) - 1]
+            qty = 1 if request.side == "SELL" and self.partial_sell else request.quantity
+            status = self.partial_status if qty < request.quantity else "FILLED"
+            if request.side == "SELL":
+                self.positions[request.code] -= qty
+                self.cash += qty * 50_000
+            else:
+                self.positions[request.code] = self.positions.get(request.code, 0) + qty
+                self.cash -= qty * 50_000
+            fill = BrokerFill(
+                f"fill-{ref}", request.code, request.side, qty, 50_000, "now"
+            )
+            outcomes.append(OrderOutcome(ref, status, (fill,)))
+        return outcomes
+
+
+def _config():
+    return StrategyConfig(
+        capital_mode=CapitalMode.FIXED_CAP, capital_cap_krw=1_000_000,
+        max_equity_weight=Decimal(".70"), max_single_name_weight=Decimal(".30"),
+        max_sector_weight=Decimal(".35"), rebalance_deadband=Decimal(".05"),
+        daily_turnover_limit=Decimal(".25"), max_signal_age_days=90,
+        min_order_krw=50_000, live_trading_enabled=True, kill_switch=False,
+    )
+
+
+def test_partial_sell_blocks_buy_phase(tmp_path, signal):
+    ledger = Ledger(tmp_path / "ledger.db")
+    ledger.db.execute(
+        "INSERT INTO strategy_positions VALUES('021240',2,'now')"
+    )
+    ledger.db.commit()
+    sell = signal(verdict=Verdict.HOLD, targets_krw=None)
+    buy = signal(analysis_id="a-2", code="271560", name="오리온")
+    broker = _Broker(partial_sell=True)
+    run_id = ExecutionEngine(broker, ledger, _Logger(), _config()).run([sell, buy])
+    assert [request.side for request in broker.requests] == ["SELL"]
+    status = ledger.db.execute("SELECT status FROM runs WHERE run_id=?", (run_id,)).fetchone()[0]
+    assert status == "AWAITING_SELL_COMPLETION"
+    assert ledger.strategy_quantity("021240") == 1
+
+
+def test_full_sell_reconciles_before_buy(tmp_path, signal):
+    ledger = Ledger(tmp_path / "ledger.db")
+    ledger.db.execute(
+        "INSERT INTO strategy_positions VALUES('021240',2,'now')"
+    )
+    ledger.db.commit()
+    sell = signal(verdict=Verdict.HOLD, targets_krw=None)
+    buy = signal(
+        analysis_id="a-2", code="271560", name="오리온", sector="커뮤니케이션"
+    )
+    broker = _Broker(partial_sell=False)
+    ExecutionEngine(broker, ledger, _Logger(), _config()).run([sell, buy])
+    assert [request.side for request in broker.requests] == ["SELL", "BUY"]
+    assert ledger.strategy_quantity("021240") == 0
+    assert ledger.strategy_quantity("271560") > 0
+
+
+def test_cancelled_partial_sell_retries_only_remaining_quantity(tmp_path, signal):
+    ledger = Ledger(tmp_path / "ledger.db")
+    ledger.db.execute(
+        "INSERT INTO strategy_positions VALUES('021240',2,'now')"
+    )
+    ledger.db.commit()
+    sell = signal(verdict=Verdict.HOLD, targets_krw=None)
+    buy = signal(
+        analysis_id="a-2", code="271560", name="오리온", sector="커뮤니케이션"
+    )
+    broker = _Broker(partial_sell=True, partial_status="CANCELLED")
+    engine = ExecutionEngine(broker, ledger, _Logger(), _config())
+    engine.run([sell, buy])
+    broker.partial_sell = False
+    engine.run([sell, buy])
+    sell_requests = [request for request in broker.requests if request.side == "SELL"]
+    assert [request.quantity for request in sell_requests] == [2, 1]
+    assert ledger.strategy_quantity("021240") == 0
+
+
+def test_duplicate_codes_halt(tmp_path, signal):
+    from ai_berkshire_trading.execution import SafetyHalt
+    ledger = Ledger(tmp_path / "ledger.db")
+    engine = ExecutionEngine(_Broker(False), ledger, _Logger(), _config())
+    with pytest.raises(SafetyHalt):
+        engine.run([signal(), signal(analysis_id="a-2")])
+
+
+def test_zero_ask_halts_and_records_reason(tmp_path, signal):
+    from ai_berkshire_trading.broker import Quote
+    from ai_berkshire_trading.execution import SafetyHalt
+
+    class _NoAsk(_Broker):
+        def quote(self, code):
+            return Quote(code, 50_000, 49_900, 0, "now")
+
+    ledger = Ledger(tmp_path / "ledger.db")
+    engine = ExecutionEngine(_NoAsk(False), ledger, _Logger(), _config())
+    with pytest.raises(SafetyHalt):
+        engine.run([signal()])
+    row = ledger.db.execute("SELECT status, reason FROM runs").fetchone()
+    assert row["status"] == "HALTED"
+    assert "price" in row["reason"]
+
+
+def test_rejected_order_marks_intent_and_halts(tmp_path, signal):
+    from ai_berkshire_trading.broker import OrderRejected
+    from ai_berkshire_trading.execution import SafetyHalt
+
+    class _Rejecting(_Broker):
+        def submit(self, order):
+            raise OrderRejected("APBK0919 insufficient cash")
+
+    ledger = Ledger(tmp_path / "ledger.db")
+    broker = _Rejecting(False)
+    broker.positions = {}
+    engine = ExecutionEngine(broker, ledger, _Logger(), _config())
+    with pytest.raises(SafetyHalt):
+        engine.run([signal()])
+    intent = ledger.db.execute("SELECT status FROM order_intents").fetchone()
+    assert intent["status"] == "REJECTED"
+    run_row = ledger.db.execute("SELECT status, reason FROM runs").fetchone()
+    assert run_row["status"] == "HALTED" and "rejected" in run_row["reason"]

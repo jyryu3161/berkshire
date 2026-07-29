@@ -52,6 +52,18 @@ def main():
         "fcf_eok": rec.get("fcf_sum_eok"), "date": sys.argv[3] if len(sys.argv) > 3 else None,
         "body_md": body,
     }
+
+    # 실전 매매 sidecar — 불완전하면 None(경고만), 연구 발행은 계속된다.
+    try:
+        import kr_trade_signal
+        cycle_path = os.path.join(_ROOT, "data", "kr_active_month.txt")
+        cycle = (open(cycle_path, encoding="utf-8").read().strip()
+                 if os.path.exists(cycle_path) else "kr-weekly")
+        signal = kr_trade_signal.build_trade_signal(report, body, f"kr-{cycle}")
+        if signal:
+            report["trade_signal"] = signal
+    except Exception as exc:
+        sys.stderr.write(f"⚠️ trade_signal 생성 실패(발행은 계속): {exc}\n")
     name = report["name"]
     # 로컬 저장
     d = os.path.join(_ROOT, "reports", name)

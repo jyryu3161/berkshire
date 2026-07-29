@@ -68,6 +68,12 @@
      - 估值验算：`python3 tools/financial_rigor.py verify-valuation --price {价格} --eps {EPS} --bvps {每股净资产}`
      - 关键数据交叉验证：`python3 tools/financial_rigor.py cross-validate --field {字段} --values '{JSON}' --unit {单位}`
      - 三情景估值：`python3 tools/financial_rigor.py three-scenario --price {价格} --eps {EPS} --shares {股本亿} --growth {乐观} {中性} {悲观} --pe {乐观PE} {中性PE} {悲观PE}`
+     - **目标价三法交叉验证（必须，禁止只用单一方法）**：用 `tools/valuation.py` 同时算 DCF·相对估值·RIM 并交叉核对：
+       - 相对估值：`python3 tools/valuation.py per --eps {预期EPS} --target-per {目标PER} --current {现价}`（成长/一般企业首选）；资产/金融股加 `pbr`，设备密集/高折旧加 `ev-ebitda`
+       - RIM 剩余收益（价投核心，数据扭曲最小）：`python3 tools/valuation.py rim --bps {每股净资产} --roe {可持续ROE} --coe {股东权益成本≈无风险利率+β风险溢价} --growth {永续g} --years 5 --current {现价}`
+       - DCF 绝对估值（现金流稳定的成熟企业适用）：`python3 tools/valuation.py dcf --fcf-ps {每股自由现金流} --wacc {折现率} --g1 {预测期增速} --years 5 --g-term {永续增速} --current {现价}`
+       - 综合交叉验证（生成目标价上/中/下三档）：把可用方法写入 JSON 后 `python3 tools/valuation.py target --config {报告}.json --md`，将输出的马克丹表直接嵌入报告
+       - 原则：至少两种方法交叉核对，加权平均为"中性目标价"，最低值为"保守买入基准线"。数据缺失（如 FCF）的方法留空、不臆测（GIGO 原则）。方法与假设（目标PER、WACC、COE、g）必须在报告中透明列出。
      - 将工具输出结果直接嵌入报告中作为验证记录
 
 #### 任务3：行业与竞争分析
@@ -92,6 +98,10 @@
   6. 治理结构：股权结构、关联交易、股东回报政策
   7. 长期确定性：10年后公司会怎样？什么可能颠覆其商业模式？
   8. 要求搜索最新监管动态、管理层言论等
+  9. **技术面/择时分析（区分"便宜"与"买点"）**：韩股用 `python3 tools/kr_technical.py analyze {code} --tf month --md`（月线）与 `--tf week`（周线）。
+     判定：趋势 vs 箱体（周期）、当前位置（上/中/下沿，按收盘价百分位）、长期区间·距ATH回撤·均线乖离·RSI、新进入择时是否合适。
+     原则："基本面买入=生意价值判断，非入场时机"。箱体股在上沿（收盘价高百分位·均线大幅乖离）即使低PER也属价值陷阱风险，
+     价值买入应在箱体下沿分批；趋势股在均线支撑回调分批。结论须与"策略建议·目标价"一致。可用 `chart` 子命令生成月线图附于报告。
 
 ### 第四步：启动4个并行Agent
 

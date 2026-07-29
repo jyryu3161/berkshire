@@ -99,6 +99,13 @@ python3 tools/notion_publish.py add data/kr_work/{코드}_report.json --bucket "
 report.json 필드: name, code, market, score(종합 5점), verdict(매수|보류|관망|제외),
 one_liner, s_biz/s_fin/s_ind/s_risk(각 대가 ★), gross_margin, ocf_ni, fcf_eok,
 date(YYYY-MM-DD), body_md(한국어 리포트 전문).
+
+⚠️ **verdict는 실전 매매 신호다.** `tools/kr_publish_one.py`가 발행 시
+`tools/kr_trade_signal.py`로 trade_signal sidecar를 생성하고, trading/ 실행
+경계가 이를 받아 실계좌 주문을 낸다. `매수` verdict는 반드시 캐노니컬
+'목표주가 교차검증' 3밴드 표(valuation.py 출력 그대로)가 본문에 있어야
+신호가 되며, 확신 없는 종목에 `매수`를 쓰지 말 것. 비매수 verdict는 기존
+보유분의 청산 신호가 된다.
 - `--bucket` 미지정 시 `--month`(YYYY-MM) 또는 report.date의 월로 폴백(back-compat).
 - 루트 미지정 시 `notion_publish.py set-root <경제분석_page_id>` 먼저. 상태는 data/notion_db.json 캐시.
 - 버킷 페이지 정리: `notion_publish.py archive-bucket <버킷명>` (휴지통 이동).

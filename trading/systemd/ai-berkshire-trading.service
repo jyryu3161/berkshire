@@ -1,0 +1,9 @@
+[Unit]
+Description=AI Berkshire Korean equity trading run
+
+[Service]
+Type=oneshot
+# Safe default: flip to true only after configs, token cache, and a dry
+# validation run are in place. The run command refuses to trade without it.
+Environment=LIVE_TRADING_ENABLED=false
+ExecStart=/usr/bin/flock -n %h/ai-berkshire/local/trading/run.lock %h/ai-berkshire/trading/.venv/bin/ai-berkshire-trading run --config %h/.config/ai-berkshire/trading.json

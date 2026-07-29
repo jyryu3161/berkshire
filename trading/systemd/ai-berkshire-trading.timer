@@ -1,0 +1,10 @@
+[Unit]
+Description=Run AI Berkshire trading at 14:30 KST on weekdays
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 14:30:00 Asia/Seoul
+Persistent=false
+Unit=ai-berkshire-trading.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,93 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from decimal import Decimal, ROUND_DOWN
+
+from .models import AnalysisSnapshot, Verdict
+
+D = Decimal
+
+
+def price_multiplier(price: int, bear: int, base: int, bull: int) -> Decimal:
+    if price <= bear:
+        return D("1")
+    if price < base:
+        return D("1") - D("0.5") * D(price - bear) / D(base - bear)
+    if price < bull:
+        return D("0.5") * D(bull - price) / D(bull - base)
+    return D("0")
+
+
+def raw_target_weight(signal: AnalysisSnapshot, price: int, strategy_owned: int,
+                      max_single: Decimal = D("0.30")) -> Decimal:
+    if signal.verdict is not Verdict.BUY:
+        return D("0")
+    assert signal.targets_krw
+    if strategy_owned == 0 and price > signal.targets_krw.bear:
+        return D("0")
+    t = signal.targets_krw
+    return max_single * price_multiplier(price, t.bear, t.base, t.bull)
+
+
+def scale_equity_weights(weights: dict[str, Decimal], max_equity: Decimal = D("0.70")) -> dict[str, Decimal]:
+    total = sum(weights.values(), D("0"))
+    if total <= max_equity:
+        return dict(weights)
+    ratio = max_equity / total
+    result: dict[str, Decimal] = {}
+    for code, weight in weights.items():
+        result[code] = weight * ratio
+    # Decimal repeating fractions can leave a tiny residue. Assign it to the
+    # last asset so the public cash-floor contract remains exact.
+    if result:
+        last = next(reversed(result))
+        result[last] += max_equity - sum(result.values(), D("0"))
+    return result
+
+
+def capital_basis(capital_cap_krw: int | None, owned_market_value: int, orderable_cash: int) -> int:
+    available = owned_market_value + orderable_cash
+    if available <= 0:
+        raise ValueError("available strategy capital must be positive")
+    if capital_cap_krw is None:
+        return available
+    if capital_cap_krw <= 0:
+        raise ValueError("capital_cap_krw must be positive")
+    return min(capital_cap_krw, available)
+
+
+def target_quantity(weight: Decimal, capital: int, price: int) -> int:
+    if price <= 0:
+        raise ValueError("price must be positive")
+    return int((weight * D(capital) / D(price)).to_integral_value(rounding=ROUND_DOWN))
+
+
+@dataclass(frozen=True)
+class TradeDelta:
+    code: str
+    current_qty: int
+    target_qty: int
+    explicit_exit: bool = False
+
+    def should_trade(self, price: int, capital: int, deadband: Decimal = D("0.05"),
+                     min_order_krw: int = 0) -> bool:
+        if self.explicit_exit and self.target_qty == 0 and self.current_qty:
+            return True
+        value = abs(self.target_qty - self.current_qty) * price
+        return value >= max(min_order_krw, int(deadband * D(capital)))
+
+
+def apply_turnover_limit(deltas: list[TradeDelta], prices: dict[str, int], capital: int,
+                         turnover_limit: Decimal = D("0.25")) -> list[TradeDelta]:
+    exempt = [d for d in deltas if d.explicit_exit and d.target_qty == 0]
+    normal = [d for d in deltas if d not in exempt]
+    turnover = sum(abs(d.target_qty - d.current_qty) * prices[d.code] for d in normal)
+    limit = int(D(capital) * turnover_limit)
+    if turnover <= limit or turnover == 0:
+        return deltas
+    ratio = D(limit) / D(turnover)
+    limited = [
+        TradeDelta(d.code, d.current_qty, d.current_qty + int(D(d.target_qty - d.current_qty) * ratio), False)
+        for d in normal
+    ]
+    return exempt + limited

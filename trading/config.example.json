@@ -1,0 +1,14 @@
+{
+  "cano": "12345678",
+  "account_product_code": "01",
+  "capital_mode": "FIXED_CAP",
+  "capital_cap_krw": 1000000,
+  "kis_base_url": "https://openapi.koreainvestment.com:9443",
+  "app_key": "inject-outside-repository",
+  "app_secret": "inject-outside-repository",
+  "token_cache_path": "/absolute/path/to/existing-token-cache.json",
+  "notion_token_path": "~/.notion_token",
+  "trading_signals_database_id": "notion-database-id",
+  "execution_log_database_id": "notion-database-id",
+  "kill_switch": false
+}
