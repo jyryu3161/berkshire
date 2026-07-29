@@ -22,6 +22,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -69,7 +70,19 @@ def _save_cfg(c):
 
 
 def _rt(text):
-    return [{"type": "text", "text": {"content": (text or "")[:2000]}}]
+    """마크다운 인라인(**굵게**)을 Notion rich_text로 변환. 짝지은 '**'를 굵게 런으로.
+    (과거엔 별표를 리터럴로 저장 → 재발행 시 진짜 굵게로 정규화)."""
+    text = (text or "")[:1990]
+    segs = text.split("**")
+    rts, bold = [], False
+    for seg in segs:
+        if seg:
+            rt = {"type": "text", "text": {"content": seg[:2000]}}
+            if bold:
+                rt["annotations"] = {"bold": True}
+            rts.append(rt)
+        bold = not bold
+    return rts or [{"type": "text", "text": {"content": ""}}]
 
 
 def _title_of(r):
@@ -369,14 +382,32 @@ def _md_to_blocks(md, cap=95):
                 if cap and len(blocks) >= cap:
                     break
             continue
+        # 코드펜스(``` ... ```) — 여러 줄을 하나의 code 블록으로
+        if s.startswith("```"):
+            buf = []
+            i += 1
+            while i < n and not lines[i].rstrip().startswith("```"):
+                buf.append(lines[i]); i += 1
+            i += 1  # 닫는 펜스 소비
+            blocks.append({"object": "block", "type": "code",
+                           "code": {"rich_text": _rt("\n".join(buf)),
+                                    "language": "plain text"}})
+            if cap and len(blocks) >= cap:
+                break
+            continue
+        m_num = re.match(r"^(\d+)\.\s+(.*)$", s)
         if s.startswith("### "):
             b = {"heading_3": {"rich_text": _rt(s[4:])}}
         elif s.startswith("## "):
             b = {"heading_2": {"rich_text": _rt(s[3:])}}
         elif s.startswith("# "):
             b = {"heading_1": {"rich_text": _rt(s[2:])}}
+        elif s.startswith("> "):
+            b = {"quote": {"rich_text": _rt(s[2:])}}
         elif s.startswith(("- ", "* ")):
             b = {"bulleted_list_item": {"rich_text": _rt(s[2:])}}
+        elif m_num:
+            b = {"numbered_list_item": {"rich_text": _rt(m_num.group(2))}}
         else:
             b = {"paragraph": {"rich_text": _rt(s)}}
         blocks.append({"object": "block", "type": list(b)[0], **b})
@@ -405,6 +436,118 @@ def _detail_header(r):
     )
 
 
+def _append_chunked(page_id, blocks):
+    """블록 리스트를 100개씩 나눠 append(Notion children 상한 100 우회)."""
+    j = 0
+    while j < len(blocks):
+        _api("PATCH", f"/blocks/{page_id}/children", {"children": blocks[j:j + 100]})
+        j += 100
+        time.sleep(0.35)
+
+
+def _rt_to_md(rts):
+    """rich_text 배열 → 마크다운 인라인(굵게만 보존)."""
+    out = []
+    for x in rts or []:
+        t = x.get("plain_text", x.get("text", {}).get("content", "") if x.get("text") else "")
+        if not t:
+            continue
+        if x.get("annotations", {}).get("bold"):
+            t = f"**{t}**"
+        out.append(t)
+    return "".join(out)
+
+
+def _block_to_md(b, blocks_by_parent=None):
+    """단일 블록 → 마크다운 줄(들). 표는 자식 table_row로 파이프표 생성."""
+    t = b.get("type")
+    p = b.get(t, {}) or {}
+    if t == "heading_1":
+        return "# " + _rt_to_md(p.get("rich_text"))
+    if t == "heading_2":
+        return "## " + _rt_to_md(p.get("rich_text"))
+    if t == "heading_3":
+        return "### " + _rt_to_md(p.get("rich_text"))
+    if t == "bulleted_list_item":
+        return "- " + _rt_to_md(p.get("rich_text"))
+    if t == "numbered_list_item":
+        return "1. " + _rt_to_md(p.get("rich_text"))
+    if t == "quote":
+        return "> " + _rt_to_md(p.get("rich_text"))
+    if t == "code":
+        code = _rt_to_md(p.get("rich_text"))
+        return f"```\n{code}\n```"
+    if t == "divider":
+        return "---"
+    if t == "table":
+        rows = [k for k in _get_children(b["id"]) if k.get("type") == "table_row"]
+        lines = []
+        for ri, row in enumerate(rows):
+            cells = [_rt_to_md(c) for c in row.get("table_row", {}).get("cells", [])]
+            lines.append("| " + " | ".join(cells) + " |")
+            if ri == 0 and p.get("has_column_header"):
+                lines.append("|" + "|".join(["---"] * len(cells)) + "|")
+        return "\n".join(lines)
+    if t == "paragraph":
+        return _rt_to_md(p.get("rich_text"))
+    return ""  # unsupported/media → 생략
+
+
+def _page_to_md(page_id):
+    """페이지 본문 블록 → 마크다운 재구성(retrofit 재포맷 입력용)."""
+    out = []
+    for b in _get_children(page_id):
+        md = _block_to_md(b)
+        if md is not None and md != "":
+            out.append(md)
+    return "\n\n".join(out)
+
+
+def cmd_list_bucket(bucket):
+    """버킷 DB의 모든 행 → [{page_id, name, score, verdict}] JSON."""
+    c = _cfg()
+    if bucket not in c["months"]:
+        sys.stderr.write(f"❌ 버킷 없음: {bucket}\n"); sys.exit(1)
+    db_id = c["months"][bucket]["db_id"]
+    rows, cur = [], None
+    while True:
+        body = {"page_size": 100}
+        if cur:
+            body["start_cursor"] = cur
+        d = _api("POST", f"/databases/{db_id}/query", body)
+        rows += d.get("results", [])
+        if not d.get("has_more"):
+            break
+        cur = d.get("next_cursor"); time.sleep(0.3)
+    out = []
+    for pg in rows:
+        P = pg.get("properties", {})
+        name = "".join(x.get("plain_text", "") for x in P.get("종목명", {}).get("title", []))
+        out.append({"page_id": pg["id"], "name": name,
+                    "score": P.get("종합점수", {}).get("number"),
+                    "verdict": (P.get("종합의견", {}).get("select") or {}).get("name")})
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+
+
+def cmd_get_md(page_id):
+    """페이지 본문을 마크다운으로 출력(stdout)."""
+    sys.stdout.write(_page_to_md(page_id))
+
+
+def cmd_replace_body(page_id, md_path):
+    """페이지의 기존 본문 블록을 모두 삭제하고 md_path 내용으로 재작성."""
+    md = (open(md_path, encoding="utf-8").read() if md_path != "-" else sys.stdin.read())
+    # 1) 기존 자식 블록 삭제
+    old = _get_children(page_id)
+    for b in old:
+        _api("DELETE", f"/blocks/{b['id']}")
+        time.sleep(0.2)
+    # 2) 새 블록 append(청크)
+    blocks = _md_to_blocks_full(md)
+    _append_chunked(page_id, blocks)
+    print(f"✅ 본문 교체: {page_id} ({len(old)}블록 삭제 → {len(blocks)}블록)")
+
+
 def cmd_add(report_path, bucket=None, month=None):
     r = json.load(open(report_path, encoding="utf-8")) if report_path != "-" else json.load(sys.stdin)
     # 라우팅 키: --bucket(사이클 등) 우선 → --month → report.date의 월
@@ -423,10 +566,14 @@ def cmd_add(report_path, bucket=None, month=None):
         "분석일": {"date": {"start": datetime.datetime.now(_KST).replace(microsecond=0).isoformat()}},
     }
     body_md = _detail_header(r) + "\n" + (r.get("body_md", "") or "")
+    blocks = _md_to_blocks_full(body_md)          # cap 없이 전체(뒷 섹션 절삭 방지)
+    first, rest = blocks[:100], blocks[100:]       # 최초 100 + 나머지는 청크 append
     d = _api("POST", "/pages", {"parent": {"database_id": db_id},
-                                "properties": props, "children": _md_to_blocks(body_md)})
+                                "properties": props, "children": first})
     if d.get("id"):
-        print(f"✅ 등록: {r.get('name')} [{bucket}] → {d['id']}")
+        if rest:
+            _append_chunked(d["id"], rest)
+        print(f"✅ 등록: {r.get('name')} [{bucket}] → {d['id']} ({len(blocks)}블록)")
     else:
         sys.stderr.write("❌ 등록 실패.\n"); sys.exit(1)
 
@@ -443,6 +590,9 @@ def main():
     mb = sub.add_parser("migrate-bucket"); mb.add_argument("src"); mb.add_argument("dst")
     ad = sub.add_parser("add"); ad.add_argument("report")
     ad.add_argument("--bucket"); ad.add_argument("--month")
+    lb = sub.add_parser("list-bucket"); lb.add_argument("bucket")
+    gm = sub.add_parser("get-md"); gm.add_argument("page_id")
+    rb = sub.add_parser("replace-body"); rb.add_argument("page_id"); rb.add_argument("md")
     a = ap.parse_args()
     {"find-page": lambda: cmd_find_page(a.query),
      "set-root": lambda: cmd_set_root(a.page_id),
@@ -450,7 +600,10 @@ def main():
      "ensure-month": lambda: cmd_ensure_bucket(a.month),
      "archive-bucket": lambda: cmd_archive_bucket(a.bucket),
      "migrate-bucket": lambda: cmd_migrate_bucket(a.src, a.dst),
-     "add": lambda: cmd_add(a.report, a.bucket, a.month)}[a.cmd]()
+     "add": lambda: cmd_add(a.report, a.bucket, a.month),
+     "list-bucket": lambda: cmd_list_bucket(a.bucket),
+     "get-md": lambda: cmd_get_md(a.page_id),
+     "replace-body": lambda: cmd_replace_body(a.page_id, a.md)}[a.cmd]()
 
 
 if __name__ == "__main__":
