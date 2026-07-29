@@ -29,6 +29,10 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _UNIVERSE = os.path.join(_ROOT, "data", "kr_deep_universe.json")
 _SCREEN2 = os.path.join(_ROOT, "data", "kr_screen2_result.json")
 _STATE = os.path.join(_ROOT, "data", "kr_deep_queue.json")
+_LEDGER = os.path.join(_ROOT, "local", "trading", "ledger.sqlite3")
+# 보유 종목 재분석 보장 주기(일). 신호 유효기간 90일 전에 넉넉히 갱신되도록
+# 8주로 잡는다 — 이보다 오래된 보유 종목은 done 여부와 무관하게 재분석한다.
+_HELD_REFRESH_DAYS = 56
 
 
 def _pass_list():
@@ -54,13 +58,57 @@ def _save(st):
     json.dump(st, open(_STATE, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 
 
+def _held_first():
+    """실전 보유 종목은 매 배치 최우선 재평가 대상.
+
+    청산 트리거가 verdict 변경뿐이므로, 보유 종목이 재스크리닝에서
+    탈락하거나 큐 후순위로 밀리면 90일 동결로 방치된다. 따라서
+    (a) 유니버스 포함 여부와 무관하게 강제 포함하고, (b) 이번 사이클에
+    이미 분석했더라도 _HELD_REFRESH_DAYS 초과면 다시 분석한다.
+    """
+    if not os.path.exists(_LEDGER):
+        return []
+    import sqlite3
+    db = sqlite3.connect(f"file:{_LEDGER}?mode=ro", uri=True)
+    try:
+        entries = []
+        for (code,) in db.execute(
+            "SELECT code FROM strategy_positions WHERE quantity > 0 ORDER BY code"
+        ).fetchall():
+            row = db.execute(
+                "SELECT payload, MAX(analyzed_at) FROM signals WHERE code=?", (code,)
+            ).fetchone()
+            name, market, age = code, "KOSPI", None
+            if row and row[0]:
+                payload = json.loads(row[0])
+                name = payload.get("name", code)
+                market = payload.get("market", "KOSPI")
+                try:
+                    analyzed = datetime.date.fromisoformat(str(row[1])[:10])
+                    age = (datetime.date.today() - analyzed).days
+                except (ValueError, TypeError):
+                    age = None
+            # 신선한 신호가 있으면 이번엔 쉰다 — 56일이 지나는 순간부터
+            # done 여부와 무관하게 매 배치 재주입되므로 보장은 유지된다.
+            if age is not None and age < _HELD_REFRESH_DAYS:
+                continue
+            entries.append({"code": code, "name": name, "market": market,
+                            "score": None, "held": True})
+        return entries
+    finally:
+        db.close()
+
+
 def cmd_next(n):
     st = _state()
     done = set(st["done"])
-    batch = [{"code": r["code"], "name": r["name"], "market": r["market"],
-              "score": r.get("score")}
-             for r in _pass_list() if r["code"] not in done][:n]
-    print(json.dumps(batch, ensure_ascii=False, indent=2))
+    held = _held_first()
+    held_codes = {h["code"] for h in held}
+    rest = [{"code": r["code"], "name": r["name"], "market": r["market"],
+             "score": r.get("score")}
+            for r in _pass_list()
+            if r["code"] not in done and r["code"] not in held_codes]
+    print(json.dumps((held + rest)[:n], ensure_ascii=False, indent=2))
 
 
 def cmd_mark(codes):
