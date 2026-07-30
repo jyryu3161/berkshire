@@ -29,6 +29,7 @@ def signal_properties(signal: AnalysisSnapshot) -> dict:
         "Name": {"rich_text": [{"text": {"content": signal.name}}]},
         "Sector": {"rich_text": [{"text": {"content": signal.sector or ""}}]},
         "Verdict": {"select": {"name": signal.verdict.value}},
+        "Cycle": {"select": {"name": signal.cycle_id}},
         "Analyzed At": {"date": {"start": signal.analyzed_at.isoformat()}},
         "Published At": {"date": {"start": signal.published_at.isoformat()}},
         "Bear": {"number": targets.bear if targets else None},

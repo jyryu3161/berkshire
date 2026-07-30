@@ -102,3 +102,36 @@ def test_run_wires_engine_end_to_end(tmp_path, monkeypatch, signal):
         assert "split-brain" in str(exc)
     else:
         raise AssertionError("capital mismatch must refuse to run")
+
+
+def test_ingest_outbox_archives_files(tmp_path, signal):
+    from ai_berkshire_trading.cli import _ingest_outbox
+    from ai_berkshire_trading.ledger import Ledger
+    from ai_berkshire_trading.runtime_log import runtime_logger
+
+    outbox = tmp_path / "signals"
+    outbox.mkdir()
+    good = signal()
+    (outbox / "good.json").write_text(good.canonical_json())
+    (outbox / "bad.json").write_text("{broken json")
+
+    ledger = Ledger(tmp_path / "ledger.db")
+    appended = []
+
+    class _Sink:
+        def append(self, s):
+            appended.append(s.analysis_id)
+            return "page"
+
+    runtime = runtime_logger(tmp_path / "rt.jsonl")
+    _ingest_outbox(ledger, _Sink(), outbox, runtime)
+    assert appended == ["a-1"]
+    assert (outbox / "processed" / "good.json").exists()
+    assert (outbox / "rejected" / "bad.json").exists()
+    assert not list(outbox.glob("*.json"))            # 루트는 비워짐
+
+    # 중복 재수집: 원장은 무시하되 파일은 processed로 이동, Notion 미러 없음
+    (outbox / "good2.json").write_text(good.canonical_json())
+    _ingest_outbox(ledger, _Sink(), outbox, runtime)
+    assert (outbox / "processed" / "good2.json").exists()
+    assert appended == ["a-1"]

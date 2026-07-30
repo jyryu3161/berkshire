@@ -72,6 +72,12 @@ def _read_notion_token(path: str) -> str:
 
 def _ingest_outbox(ledger: Ledger, sink: NotionSignalSink, signals_dir: Path,
                    runtime) -> None:
+    """outbox의 신호를 원장에 수집하고 파일을 아카이브한다.
+
+    수집(신규·중복 모두)된 파일은 processed/로, 형식 불량은 rejected/로
+    이동한다 — 매 실행이 무한히 쌓인 디렉토리를 재스캔하거나 같은 불량
+    파일 경고를 반복하지 않도록.
+    """
     for path in sorted(signals_dir.glob("*.json")):
         try:
             snapshot = AnalysisSnapshot.from_dict(
@@ -80,6 +86,9 @@ def _ingest_outbox(ledger: Ledger, sink: NotionSignalSink, signals_dir: Path,
             inserted = ledger.add_signal(snapshot)
         except Exception as exc:
             log_event(runtime, "SIGNAL_REJECTED", path=path.name, error=str(exc))
+            rejected = signals_dir / "rejected"
+            rejected.mkdir(parents=True, exist_ok=True)
+            path.replace(rejected / path.name)
             continue
         if inserted:
             try:
@@ -87,6 +96,9 @@ def _ingest_outbox(ledger: Ledger, sink: NotionSignalSink, signals_dir: Path,
             except Exception as exc:
                 log_event(runtime, "NOTION_SIGNAL_APPEND_FAILED",
                           analysis_id=snapshot.analysis_id, error=str(exc))
+        processed = signals_dir / "processed"
+        processed.mkdir(parents=True, exist_ok=True)
+        path.replace(processed / path.name)
 
 
 def _load_signals(ledger: Ledger) -> list[AnalysisSnapshot]:
