@@ -29,6 +29,12 @@ def export(report_path: str, source_page_id: str) -> int:
 def main() -> None:
     try:
         raise SystemExit(export(sys.argv[1], sys.argv[2]))
+    except SystemExit:
+        raise
     except Exception as exc:
         print(f"signal export rejected: {exc}", file=sys.stderr)
         raise SystemExit(2)
+
+
+if __name__ == "__main__":
+    main()

@@ -550,6 +550,21 @@ def cmd_replace_body(page_id, md_path):
 
 def cmd_add(report_path, bucket=None, month=None):
     r = json.load(open(report_path, encoding="utf-8")) if report_path != "-" else json.load(sys.stdin)
+    # 실전 매매 sidecar — 발행 경로가 무엇이든(에이전트 직접 호출 포함) 여기서 생성한다.
+    # 발행 성공 후 export 서브프로세스가 리포트 "파일"을 읽으므로 파일에도 기록해야 한다.
+    if not r.get("trade_signal") and report_path != "-" and r.get("verdict") and r.get("body_md"):
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import kr_trade_signal
+            cycle_path = os.path.join(_ROOT, "data", "kr_active_month.txt")
+            cycle = (open(cycle_path, encoding="utf-8").read().strip()
+                     if os.path.exists(cycle_path) else "kr-weekly")
+            signal = kr_trade_signal.build_trade_signal(r, r["body_md"], f"kr-{cycle}")
+            if signal:
+                r["trade_signal"] = signal
+                json.dump(r, open(report_path, "w", encoding="utf-8"), ensure_ascii=False)
+        except Exception as exc:
+            sys.stderr.write(f"⚠️ trade_signal 생성 실패(발행은 계속): {exc}\n")
     # 라우팅 키: --bucket(사이클 등) 우선 → --month → report.date의 월
     if not bucket:
         bucket = month or (r.get("date") or "")[:7]
