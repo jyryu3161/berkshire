@@ -82,5 +82,7 @@ report.json 필드는 kr-weekly-picks.md 규격을 따르고 body_md에 % 리터
 
 # 안전장치: 혹시 백그라운드 작업이 남더라도 넉넉히 대기(강제종료로 인한 미발행 방지, 40분)
 export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=2400000
-/home/ubuntu/.local/bin/claude -p "$PROMPT" --dangerously-skip-permissions >>"$LOG" 2>&1
+# 모델 고정: 사용자 기본값(Fable 5)은 토큰 소모가 커서 일일 분석은 Opus 5로 실행.
+# 서브에이전트(4대가 Agent)도 부모 모델을 상속한다.
+/home/ubuntu/.local/bin/claude -p "$PROMPT" --model claude-opus-5 --dangerously-skip-permissions >>"$LOG" 2>&1
 echo "===== [$(date '+%F %T %Z')] 그룹 종료 exit=$? =====" >>"$LOG"
