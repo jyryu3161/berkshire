@@ -18,14 +18,34 @@ def price_multiplier(price: int, bear: int, base: int, bull: int) -> Decimal:
     return D("0")
 
 
+# 밴드 신뢰 조건: bear가 base의 절반 이상(밴드 폭 2배 이내)이어야
+# 방법 간 불일치가 없다고 보고 base 아래 분할 진입을 허용한다.
+_BAND_QUALITY_MIN = D("0.5")
+
+
+def bands_reliable(bear: int, base: int) -> bool:
+    return D(bear) >= D(base) * _BAND_QUALITY_MIN
+
+
 def raw_target_weight(signal: AnalysisSnapshot, price: int, strategy_owned: int,
                       max_single: Decimal = D("0.30")) -> Decimal:
+    """매수 신호의 계좌 목표 비중.
+
+    신규 진입 게이트: 밴드가 신뢰 가능하면 base 미만에서 분할 진입
+    (base 부근 절반 비중 → bear에서 풀비중), 밴드 폭이 과도하면
+    (방법 간 불일치) 종전대로 bear 이하에서만 진입한다. 보유 중이면
+    게이트 없이 곡선 비중을 그대로 따른다(가격 회복 시 점진 축소).
+    """
     if signal.verdict is not Verdict.BUY:
         return D("0")
     assert signal.targets_krw
-    if strategy_owned == 0 and price > signal.targets_krw.bear:
-        return D("0")
     t = signal.targets_krw
+    if strategy_owned == 0:
+        if bands_reliable(t.bear, t.base):
+            if price >= t.base:
+                return D("0")
+        elif price > t.bear:
+            return D("0")
     return max_single * price_multiplier(price, t.bear, t.base, t.bull)
 
 

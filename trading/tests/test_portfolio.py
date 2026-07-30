@@ -1,9 +1,9 @@
 from decimal import Decimal
 
-from ai_berkshire_trading.models import Verdict
+from ai_berkshire_trading.models import Targets, Verdict
 from ai_berkshire_trading.portfolio import (
-    TradeDelta, apply_turnover_limit, capital_basis, price_multiplier,
-    raw_target_weight, scale_equity_weights,
+    TradeDelta, apply_turnover_limit, bands_reliable, capital_basis,
+    price_multiplier, raw_target_weight, scale_equity_weights,
 )
 
 
@@ -15,11 +15,20 @@ def test_boundaries_and_linear_multiplier():
     assert price_multiplier(90, 50, 70, 90) == 0
 
 
-def test_entry_hysteresis_and_owned_rebalance(signal):
-    s = signal()
-    assert raw_target_weight(s, 60_000, 0) == 0
-    assert raw_target_weight(s, 60_000, 1) == Decimal("0.225")
-    assert raw_target_weight(s, 50_000, 0) == Decimal("0.30")
+def test_entry_gate_with_band_quality(signal):
+    s = signal()  # bear 50k / base 70k / bull 90k — bear ≥ base×0.5 → 신뢰 가능
+    assert bands_reliable(50_000, 70_000)
+    assert raw_target_weight(s, 70_000, 0) == 0                  # base 이상 신규 진입 금지
+    assert raw_target_weight(s, 60_000, 0) == Decimal("0.225")   # base 미만 분할 진입(0.75×30%)
+    assert raw_target_weight(s, 50_000, 0) == Decimal("0.30")    # bear 이하 풀비중
+    assert raw_target_weight(s, 60_000, 1) == Decimal("0.225")   # 보유 시 곡선 그대로
+
+    wide = signal(targets_krw=Targets(20_000, 70_000, 90_000))   # bear < base/2 — 밴드 불신
+    assert not bands_reliable(20_000, 70_000)
+    assert raw_target_weight(wide, 60_000, 0) == 0               # base 미만이어도 진입 금지
+    assert raw_target_weight(wide, 20_000, 0) == Decimal("0.30") # bear 이하만 진입
+    assert raw_target_weight(wide, 60_000, 1) > 0                # 보유 중이면 곡선 적용
+
     assert raw_target_weight(signal(verdict=Verdict.HOLD, targets_krw=None), 50_000, 3) == 0
 
 
