@@ -99,6 +99,13 @@ class TradeDelta:
 
 def apply_turnover_limit(deltas: list[TradeDelta], prices: dict[str, int], capital: int,
                          turnover_limit: Decimal = D("0.25")) -> list[TradeDelta]:
+    """일일 회전율 한도 내 배분. 위험 이탈(explicit exit)은 면제.
+
+    비례 내림만 쓰면 소수 주식이 0으로 잘리고 예산이 남는 낭비가 생기므로
+    (예: 한도 25만원에 9만원만 쓰고 13.5만원짜리 1주를 포기), 내림 배분 뒤
+    남은 예산을 잔여 수요가 있는 종목에 소수점 잔여가 큰 순서로 1주씩
+    채워 넣는다.
+    """
     exempt = [d for d in deltas if d.explicit_exit and d.target_qty == 0]
     normal = [d for d in deltas if d not in exempt]
     turnover = sum(abs(d.target_qty - d.current_qty) * prices[d.code] for d in normal)
@@ -106,8 +113,27 @@ def apply_turnover_limit(deltas: list[TradeDelta], prices: dict[str, int], capit
     if turnover <= limit or turnover == 0:
         return deltas
     ratio = D(limit) / D(turnover)
-    limited = [
-        TradeDelta(d.code, d.current_qty, d.current_qty + int(D(d.target_qty - d.current_qty) * ratio), False)
-        for d in normal
-    ]
+    alloc: dict[str, int] = {}
+    remainders = []
+    for d in normal:
+        desired = abs(d.target_qty - d.current_qty)
+        exact = D(desired) * ratio
+        alloc[d.code] = int(exact)
+        remainders.append((exact - int(exact), d.code, d))
+    budget = limit - sum(alloc[d.code] * prices[d.code] for d in normal)
+    progress = True
+    while progress:
+        progress = False
+        for _, _, d in sorted(remainders, key=lambda t: (-t[0], t[1])):
+            desired = abs(d.target_qty - d.current_qty)
+            if alloc[d.code] < desired and prices[d.code] <= budget:
+                alloc[d.code] += 1
+                budget -= prices[d.code]
+                progress = True
+    limited = []
+    for d in normal:
+        sign = 1 if d.target_qty >= d.current_qty else -1
+        limited.append(
+            TradeDelta(d.code, d.current_qty, d.current_qty + sign * alloc[d.code], False)
+        )
     return exempt + limited

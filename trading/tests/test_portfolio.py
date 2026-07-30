@@ -44,3 +44,27 @@ def test_caps_deadband_turnover_and_budget():
     assert exit_delta.should_trade(100, 10_000)
     limited = apply_turnover_limit([TradeDelta("a", 0, 100)], {"a": 100}, 10_000)
     assert limited[0].target_qty == 25
+
+
+def test_turnover_budget_greedy_topup_uses_leftover():
+    # 오늘(7/30) 실사례: 한도 25만원, 비례 내림이면 코웨이 1주(9.07만)만 사고
+    # 오리온이 0으로 잘려 16만원이 낭비된다. 탐욕 충전으로 둘 다 사야 한다.
+    deltas = [TradeDelta("021240", 0, 2), TradeDelta("271560", 0, 1)]
+    prices = {"021240": 90_700, "271560": 135_300}
+    limited = apply_turnover_limit(deltas, prices, 1_000_000)
+    by = {d.target_qty: d.code for d in limited}
+    alloc = {d.code: d.target_qty for d in limited}
+    assert alloc == {"021240": 1, "271560": 1}
+    assert sum(alloc[c] * prices[c] for c in alloc) <= 250_000
+
+
+def test_turnover_greedy_respects_limit_and_sell_direction():
+    # 매도 방향(음수 델타)에서도 부호가 유지되고 한도를 넘지 않는다
+    deltas = [TradeDelta("a", 10, 0), TradeDelta("b", 4, 0)]
+    prices = {"a": 30_000, "b": 40_000}
+    limited = apply_turnover_limit(deltas, prices, 1_000_000)  # 한도 250k, 수요 460k
+    alloc = {d.code: d.current_qty - d.target_qty for d in limited}
+    spent = sum(alloc[c] * prices[c] for c in alloc)
+    assert spent <= 250_000
+    assert spent > 250_000 - min(prices.values())   # 남은 예산에 1주도 더 못 들어감
+    assert all(d.target_qty <= d.current_qty for d in limited)
