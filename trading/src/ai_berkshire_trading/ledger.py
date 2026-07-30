@@ -43,6 +43,10 @@ CREATE TABLE IF NOT EXISTS reconciliations (
  account_quantity INTEGER NOT NULL, strategy_quantity INTEGER NOT NULL,
  checked_at TEXT NOT NULL, ok INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS trailing_peaks (
+ code TEXT PRIMARY KEY, peak_price INTEGER NOT NULL CHECK(peak_price > 0),
+ activated_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
 """
 
 
@@ -111,6 +115,28 @@ class Ledger:
                     (run_id, row["code"], account_positions.get(row["code"], 0), row["quantity"], now, int(enough)),
                 )
         return ok
+
+    def trailing_peak(self, code: str) -> int | None:
+        row = self.db.execute(
+            "SELECT peak_price FROM trailing_peaks WHERE code=?", (code,)
+        ).fetchone()
+        return int(row["peak_price"]) if row else None
+
+    def raise_trailing_peak(self, code: str, price: int) -> None:
+        """고점 기록 개시 또는 갱신 — 고점은 오르기만 한다."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self.transaction() as db:
+            db.execute(
+                """INSERT INTO trailing_peaks VALUES(?,?,?,?)
+                   ON CONFLICT(code) DO UPDATE SET
+                     peak_price=excluded.peak_price, updated_at=excluded.updated_at
+                   WHERE excluded.peak_price > trailing_peaks.peak_price""",
+                (code, price, now, now),
+            )
+
+    def clear_trailing_peak(self, code: str) -> None:
+        with self.transaction() as db:
+            db.execute("DELETE FROM trailing_peaks WHERE code=?", (code,))
 
     @staticmethod
     def idempotency_key(analysis_id: str, code: str, target_quantity: int) -> str:
@@ -235,6 +261,9 @@ class Ledger:
                     "UPDATE strategy_positions SET quantity=?, updated_at=? WHERE code=?",
                     (updated, filled_at, code),
                 )
+                if updated == 0:
+                    # 전량 청산 — 고점 기록을 지워 다음 재진입이 오염되지 않게 한다.
+                    db.execute("DELETE FROM trailing_peaks WHERE code=?", (code,))
             else:
                 if signed < 0:
                     raise ValueError("sell fill has no strategy-owned position")

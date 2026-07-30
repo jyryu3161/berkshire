@@ -11,6 +11,7 @@ class Args:
     max_sector_weight = None
     rebalance_deadband = None
     daily_turnover_limit = None
+    trailing_stop_pct = None
     max_signal_age_days = None
     min_order_krw = None
 

@@ -119,7 +119,8 @@ def _config():
         capital_mode=CapitalMode.FIXED_CAP, capital_cap_krw=1_000_000,
         max_equity_weight=Decimal(".70"), max_single_name_weight=Decimal(".30"),
         max_sector_weight=Decimal(".35"), rebalance_deadband=Decimal(".05"),
-        daily_turnover_limit=Decimal(".25"), max_signal_age_days=90,
+        daily_turnover_limit=Decimal(".25"), trailing_stop_pct=Decimal(".10"),
+        max_signal_age_days=90,
         min_order_krw=50_000, live_trading_enabled=True, kill_switch=False,
     )
 
@@ -220,3 +221,59 @@ def test_rejected_order_marks_intent_and_halts(tmp_path, signal):
     assert intent["status"] == "REJECTED"
     run_row = ledger.db.execute("SELECT status, reason FROM runs").fetchone()
     assert run_row["status"] == "HALTED" and "rejected" in run_row["reason"]
+
+
+class _PricedBroker(_Broker):
+    def __init__(self, price):
+        super().__init__(partial_sell=False)
+        self.price = price
+
+    def quote(self, code):
+        return Quote(code, self.price, self.price - 100, self.price, "now")
+
+
+def test_trailing_stop_arms_holds_then_exits(tmp_path, signal):
+    ledger = Ledger(tmp_path / "ledger.db")
+    ledger.db.execute("INSERT INTO strategy_positions VALUES('021240',2,'now')")
+    ledger.db.commit()
+    buy = signal()  # bear 50k / base 70k / bull 90k
+
+    # ① bull(90k) 도달 → 트레일링 개시, 곡선 매도(목표 0) 대신 보유 유지
+    broker = _PricedBroker(95_000)
+    broker.positions = {"021240": 2}
+    logger = _Logger()
+    ExecutionEngine(broker, ledger, logger, _config()).run([buy])
+    assert broker.requests == []                      # 매도 없음
+    assert ledger.trailing_peak("021240") == 95_000
+    assert any(e == "TRAILING_ARMED" for e, _ in logger.events)
+
+    # ② 고점 갱신
+    broker2 = _PricedBroker(100_000)
+    broker2.positions = {"021240": 2}
+    ExecutionEngine(broker2, ledger, _Logger(), _config()).run([buy])
+    assert broker2.requests == []
+    assert ledger.trailing_peak("021240") == 100_000
+
+    # ③ 고점 대비 10% 하락 → 전량 청산 + 고점 기록 삭제
+    broker3 = _PricedBroker(90_000)                   # 100k×0.9 = 90k → 발동
+    broker3.positions = {"021240": 2}
+    logger3 = _Logger()
+    ExecutionEngine(broker3, ledger, logger3, _config()).run([buy])
+    assert [(r.side, r.quantity) for r in broker3.requests] == [("SELL", 2)]
+    assert ledger.strategy_quantity("021240") == 0
+    assert ledger.trailing_peak("021240") is None     # 재진입 오염 방지
+    assert any(e == "TRAILING_STOP_TRIGGERED" for e, _ in logger3.events)
+
+
+def test_trailing_regime_ignores_curve_below_bull(tmp_path, signal):
+    ledger = Ledger(tmp_path / "ledger.db")
+    ledger.db.execute("INSERT INTO strategy_positions VALUES('021240',2,'now')")
+    ledger.db.commit()
+    ledger.raise_trailing_peak("021240", 95_000)      # 국면 이미 개시됨
+    buy = signal()
+    # 가격이 bull 아래(88k)로 내려왔지만 발동가(85.5k) 미달 → 곡선 무시하고 보유
+    broker = _PricedBroker(88_000)
+    broker.positions = {"021240": 2}
+    ExecutionEngine(broker, ledger, _Logger(), _config()).run([buy])
+    assert broker.requests == []
+    assert ledger.trailing_peak("021240") == 95_000

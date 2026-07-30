@@ -23,6 +23,7 @@ class StrategyConfig:
     max_sector_weight: Decimal
     rebalance_deadband: Decimal
     daily_turnover_limit: Decimal
+    trailing_stop_pct: Decimal
     max_signal_age_days: int
     min_order_krw: int
     live_trading_enabled: bool
@@ -52,8 +53,12 @@ class StrategyConfig:
             raise ValueError("daily_turnover_limit must be in (0, 1]")
         if not Decimal("0") <= values["rebalance_deadband"] < Decimal("1"):
             raise ValueError("rebalance_deadband must be in [0, 1)")
+        trailing = Decimal(str(raw.get("trailing_stop_pct", "0.10")))
+        if not Decimal("0") < trailing < Decimal("1"):
+            raise ValueError("trailing_stop_pct must be in (0, 1)")
         return cls(
             capital_mode=mode, capital_cap_krw=cap, **values,
+            trailing_stop_pct=trailing,
             max_signal_age_days=int(raw["max_signal_age_days"]),
             min_order_krw=int(raw["min_order_krw"]),
             live_trading_enabled=bool(raw["live_trading_enabled"]),

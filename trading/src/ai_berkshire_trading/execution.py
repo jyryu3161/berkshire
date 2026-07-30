@@ -182,10 +182,12 @@ class ExecutionEngine:
             max_sector=self.config.max_sector_weight,
             max_age_days=self.config.max_signal_age_days,
         )
+        plan, trailing_exits = self._apply_trailing_stops(plan, owned, quotes, run_id)
         deltas = [
             TradeDelta(
                 p.signal.code, p.current_qty, p.target_qty,
-                p.signal.verdict is not Verdict.BUY and not p.frozen,
+                p.signal.code in trailing_exits
+                or (p.signal.verdict is not Verdict.BUY and not p.frozen),
             )
             for p in plan if not p.frozen
         ]
@@ -196,6 +198,50 @@ class ExecutionEngine:
             )
         ]
         return account, owned, quotes, capital, plan, deltas
+
+    def _apply_trailing_stops(self, plan, owned, quotes, run_id):
+        """bull 도달 후 트레일링 스탑 국면의 보유 종목 처리.
+
+        가격이 bull 이상이 된 보유 종목은 곡선 매도 대신 고점을 추적하며
+        보유하고, 고점 대비 trailing_stop_pct 하락 시 전량 청산한다.
+        국면 진입 후에는 신호 동결·가격의 bull 하회와 무관하게 트레일링만
+        따른다(기계적 보호 장치이므로).
+        """
+        pct = self.config.trailing_stop_pct
+        adjusted, exits = [], set()
+        for p in plan:
+            code = p.signal.code
+            held = owned.get(code, 0)
+            if held <= 0:
+                adjusted.append(p)
+                continue
+            price = quotes[code].price
+            peak = self.ledger.trailing_peak(code)
+            targets = p.signal.targets_krw
+            if (peak is None and targets and p.signal.verdict is Verdict.BUY
+                    and price >= targets.bull):
+                self.ledger.raise_trailing_peak(code, price)
+                peak = price
+                self.logger.event(run_id, "TRAILING_ARMED", {
+                    "code": code, "peak_price": price, "bull": targets.bull,
+                })
+            elif peak is not None and price > peak:
+                self.ledger.raise_trailing_peak(code, price)
+                peak = price
+            if peak is None:
+                adjusted.append(p)
+                continue
+            threshold = Decimal(peak) * (Decimal("1") - pct)
+            if Decimal(price) <= threshold:
+                exits.add(code)
+                adjusted.append(PlanItem(p.signal, p.price, held, 0, False))
+                self.logger.event(run_id, "TRAILING_STOP_TRIGGERED", {
+                    "code": code, "price": price, "peak_price": peak,
+                    "quantity": held,
+                })
+            else:
+                adjusted.append(PlanItem(p.signal, p.price, held, held, False))
+        return adjusted, exits
 
     def _execute_side(
         self, side: str, deltas: list[TradeDelta], plan: list[PlanItem],

@@ -34,6 +34,7 @@ def _configure(args) -> None:
         "max_sector_weight": args.max_sector_weight,
         "rebalance_deadband": args.rebalance_deadband,
         "daily_turnover_limit": args.daily_turnover_limit,
+        "trailing_stop_pct": args.trailing_stop_pct,
         "max_signal_age_days": args.max_signal_age_days,
         "min_order_krw": args.min_order_krw,
     }
@@ -154,6 +155,7 @@ def main() -> None:
     configure.add_argument("--max-sector-weight", type=float)
     configure.add_argument("--rebalance-deadband", type=float)
     configure.add_argument("--daily-turnover-limit", type=float)
+    configure.add_argument("--trailing-stop-pct", type=float)
     configure.add_argument("--max-signal-age-days", type=int)
     configure.add_argument("--min-order-krw", type=int)
     run = sub.add_parser("run")
