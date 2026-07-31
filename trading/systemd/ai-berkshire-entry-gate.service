@@ -1,0 +1,8 @@
+[Unit]
+Description=AI Berkshire pre-trade entry gate (drop-cause judgment)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/ubuntu/ai-berkshire/tools/kr_entry_gate.py
+StandardOutput=append:/home/ubuntu/ai-berkshire/logs/kr-entry-gate.log
+StandardError=append:/home/ubuntu/ai-berkshire/logs/kr-entry-gate.log

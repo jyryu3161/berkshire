@@ -84,6 +84,10 @@ def build_plan(
     max_single: Decimal = Decimal("0.30"),
     max_sector: Decimal = Decimal("0.35"),
     max_age_days: int = 90,
+    watch_min_score: Decimal = Decimal("3.5"),
+    watch_cap: Decimal = Decimal("0.15"),
+    entry_gate: set[str] | None = None,
+    max_positions: int | None = None,
 ) -> list[PlanItem]:
     account_owned = account_owned or dict(owned)
     by_code = {signal.code: signal for signal in signals}
@@ -91,14 +95,36 @@ def build_plan(
     manual_floors: dict[str, Decimal] = {}
     frozen: set[str] = set()
     for signal in signals:
-        if signal.is_stale(now, max_age_days) or (signal.verdict is Verdict.BUY and not signal.sector):
+        if signal.is_stale(now, max_age_days):
             frozen.add(signal.code)
             continue
-        weights[signal.code] = raw_target_weight(
-            signal, prices[signal.code], owned.get(signal.code, 0), max_single
+        weight = raw_target_weight(
+            signal, prices[signal.code], owned.get(signal.code, 0), max_single,
+            watch_min_score=watch_min_score, watch_cap=watch_cap,
         )
+        if weight > 0 and not signal.sector:
+            frozen.add(signal.code)   # 업종 캡을 우회하는 비중은 허용하지 않는다
+            continue
+        weights[signal.code] = weight
         manual_qty = max(account_owned.get(signal.code, 0) - owned.get(signal.code, 0), 0)
         manual_floors[signal.code] = Decimal(manual_qty * prices[signal.code]) / Decimal(capital)
+
+    # 신규 진입 통제: ① 급락 원인 게이트(허용 목록 밖이면 차단 — 게이트가
+    # 켜져 있으면 fail-closed), ② 슬롯 상한(빈 슬롯만 현재가/base 할인이
+    # 깊은 순으로 채움; 기존 보유는 회전 없이 항상 유지).
+    new_entries = [c for c, w in weights.items() if w > 0 and owned.get(c, 0) == 0]
+    if entry_gate is not None:
+        for code in new_entries:
+            if code not in entry_gate:
+                weights[code] = Decimal("0")
+        new_entries = [c for c in new_entries if weights[c] > 0]
+    if max_positions is not None and new_entries:
+        slots = max(0, max_positions - sum(1 for q in owned.values() if q > 0))
+        if len(new_entries) > slots:
+            ranked = sorted(new_entries, key=lambda c: (
+                Decimal(prices[c]) / Decimal(by_code[c].targets_krw.base), c))
+            for code in ranked[slots:]:
+                weights[code] = Decimal("0")
 
     # Manual quantities and any position without a current actionable signal
     # reserve real exposure before allocating active targets.
@@ -154,9 +180,39 @@ class ExecutionEngine:
     """
 
     def __init__(self, broker: BrokerAdapter, ledger: Ledger, logger: ExecutionLogger,
-                 config: StrategyConfig):
+                 config: StrategyConfig, entry_gate_path: str | None = None):
         self.broker, self.ledger, self.logger = broker, ledger, logger
         self.config = config
+        self.entry_gate_path = entry_gate_path
+        self._gate_warned = False
+
+    def _load_entry_gate(self, run_id: str) -> set[str] | None:
+        """급락 원인 판단 게이트(신규 진입 허용 목록)를 읽는다.
+
+        경로 미설정이면 게이트 비활성(None). 설정 시 당일자 파일의 allow
+        목록만 유효하며, 파일이 없거나 날짜가 지나면 신규 진입을 전부
+        차단한다(fail-closed) — 매도·리밸런싱은 영향받지 않는다.
+        """
+        if not self.entry_gate_path:
+            return None
+        from .models import KST
+        today = datetime.now(KST).strftime("%Y-%m-%d")
+        try:
+            import json as _json
+            from pathlib import Path
+            raw = _json.loads(Path(self.entry_gate_path).read_text(encoding="utf-8"))
+            if raw.get("date") == today:
+                return {code for code, d in (raw.get("decisions") or {}).items()
+                        if d.get("allow")}
+        except (OSError, ValueError):
+            pass
+        if not self._gate_warned:
+            self._gate_warned = True
+            self.logger.event(run_id, "ENTRY_GATE_MISSING", {
+                "path": self.entry_gate_path,
+                "effect": "신규 진입 전면 차단(당일 게이트 없음)",
+            })
+        return set()
 
     def _calculate(self, signals: list[AnalysisSnapshot], run_id: str):
         account = self.broker.account_positions()
@@ -181,6 +237,10 @@ class ExecutionEngine:
             max_single=self.config.max_single_name_weight,
             max_sector=self.config.max_sector_weight,
             max_age_days=self.config.max_signal_age_days,
+            watch_min_score=self.config.watch_entry_min_score,
+            watch_cap=self.config.watch_entry_weight,
+            entry_gate=self._load_entry_gate(run_id),
+            max_positions=self.config.max_positions,
         )
         plan, trailing_exits = self._apply_trailing_stops(plan, owned, quotes, run_id)
         deltas = [

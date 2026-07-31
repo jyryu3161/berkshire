@@ -7,7 +7,7 @@ from ai_berkshire_trading.broker import BrokerFill, OrderOutcome, Quote
 from ai_berkshire_trading.config import CapitalMode, StrategyConfig
 from ai_berkshire_trading.execution import ExecutionEngine, build_plan
 from ai_berkshire_trading.ledger import Ledger
-from ai_berkshire_trading.models import Verdict
+from ai_berkshire_trading.models import Targets, Verdict
 
 
 def test_stale_signal_freezes_instead_of_selling(signal):
@@ -120,7 +120,8 @@ def _config():
         max_equity_weight=Decimal(".70"), max_single_name_weight=Decimal(".30"),
         max_sector_weight=Decimal(".35"), rebalance_deadband=Decimal(".05"),
         daily_turnover_limit=Decimal(".25"), trailing_stop_pct=Decimal(".10"),
-        max_signal_age_days=90,
+        watch_entry_min_score=Decimal("3.5"), watch_entry_weight=Decimal(".15"),
+        max_positions=6, max_signal_age_days=90,
         min_order_krw=50_000, live_trading_enabled=True, kill_switch=False,
     )
 
@@ -277,3 +278,38 @@ def test_trailing_regime_ignores_curve_below_bull(tmp_path, signal):
     ExecutionEngine(broker, ledger, _Logger(), _config()).run([buy])
     assert broker.requests == []
     assert ledger.trailing_peak("021240") == 95_000
+
+
+def test_entry_gate_blocks_new_entries_not_holdings(signal):
+    now = datetime.now(timezone.utc)
+    buy_new = signal()                                    # 미보유 매수 후보
+    buy_held = signal(analysis_id="a-2", code="271560", name="오리온",
+                      sector="커뮤니케이션")
+    prices = {"021240": 50_000, "271560": 50_000}
+    owned = {"271560": 2}
+    # 게이트 없음(None) → 통제 안 함
+    plan = build_plan([buy_new, buy_held], prices, owned, 1_000_000, now)
+    assert {p.signal.code: p.target_qty > 0 for p in plan} == {"021240": True, "271560": True}
+    # 게이트 빈 집합 → 신규 진입 차단, 보유분 리밸런싱은 유지
+    plan = build_plan([buy_new, buy_held], prices, owned, 1_000_000, now, entry_gate=set())
+    by = {p.signal.code: p.target_qty for p in plan}
+    assert by["021240"] == 0 and by["271560"] > 0
+    # 허용 목록에 있으면 진입
+    plan = build_plan([buy_new, buy_held], prices, owned, 1_000_000, now,
+                      entry_gate={"021240"})
+    assert {p.signal.code: p.target_qty > 0 for p in plan} == {"021240": True, "271560": True}
+
+
+def test_max_positions_fills_slots_by_attractiveness(signal):
+    now = datetime.now(timezone.utc)
+    # 보유 1 + 슬롯 1 남음, 신규 후보 2 — 현재가/base 할인 깊은 쪽만 진입
+    held = signal(analysis_id="h", code="000001", name="보유주", sector="업1")
+    cheap = signal(analysis_id="c", code="000002", name="깊은할인", sector="업2",
+                   targets_krw=Targets(50_000, 70_000, 90_000))
+    rich = signal(analysis_id="r", code="000003", name="얕은할인", sector="업3",
+                  targets_krw=Targets(50_000, 70_000, 90_000))
+    prices = {"000001": 50_000, "000002": 55_000, "000003": 65_000}  # 0.786 vs 0.929
+    plan = build_plan([held, cheap, rich], prices, {"000001": 2}, 10_000_000, now,
+                      max_positions=2)
+    by = {p.signal.code: p.target_qty for p in plan}
+    assert by["000002"] > 0 and by["000003"] == 0 and by["000001"] > 0

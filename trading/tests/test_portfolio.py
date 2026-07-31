@@ -68,3 +68,20 @@ def test_turnover_greedy_respects_limit_and_sell_direction():
     assert spent <= 250_000
     assert spent > 250_000 - min(prices.values())   # 남은 예산에 1주도 더 못 들어감
     assert all(d.target_qty <= d.current_qty for d in limited)
+
+
+def test_watch_entry_tier_rules(signal):
+    # 관망 3.5+: bear 이하 진입만, 상한 15%
+    w = signal(verdict=Verdict.WATCH, score=3.6)   # bear 50k/base 70k/bull 90k
+    assert raw_target_weight(w, 60_000, 0) == 0                     # bear 위 신규 진입 금지
+    assert raw_target_weight(w, 50_000, 0) == Decimal("0.15")       # bear 이하, 15% 캡
+    assert raw_target_weight(w, 60_000, 1) == Decimal("0.15")       # 보유 시 곡선(22.5%)이나 캡 적용
+    assert raw_target_weight(w, 80_000, 1) == Decimal("0.075")      # base 위 곡선 축소는 그대로
+    # 계단식: 점수 미달/점수 없음/보류는 보유 중이어도 0(전량 청산)
+    assert raw_target_weight(signal(verdict=Verdict.WATCH, score=3.4), 50_000, 2) == 0
+    assert raw_target_weight(signal(verdict=Verdict.WATCH), 50_000, 2) == 0
+    assert raw_target_weight(signal(verdict=Verdict.HOLD, targets_krw=None), 50_000, 2) == 0
+    # 밴드 불신 관망은 진입 불가
+    wide = signal(verdict=Verdict.WATCH, score=4.0,
+                  targets_krw=Targets(20_000, 70_000, 90_000))
+    assert raw_target_weight(wide, 20_000, 0) == 0

@@ -49,6 +49,7 @@ class AnalysisSnapshot:
     source_page_id: str
     source_hash: str
     audit_status: str
+    score: float | None = None  # 4대가 종합점수(5점 만점) — 관망 진입 자격 판정용
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "AnalysisSnapshot":
@@ -68,6 +69,7 @@ class AnalysisSnapshot:
             source_page_id=str(value["source_page_id"]),
             source_hash=str(value["source_hash"]),
             audit_status=str(value["audit_status"]),
+            score=float(value["score"]) if value.get("score") is not None else None,
         )
         result.validate()
         return result
@@ -91,6 +93,8 @@ class AnalysisSnapshot:
             raise ValueError("BUY requires sector for portfolio concentration limits")
         if self.targets_krw:
             self.targets_krw.validate()
+        if self.score is not None and not 0 <= self.score <= 5:
+            raise ValueError("score must be within 0..5")
 
     def is_stale(self, now: datetime, max_age_days: int = 90) -> bool:
         return now.astimezone(timezone.utc) - self.analyzed_at.astimezone(timezone.utc) > timedelta(days=max_age_days)
@@ -106,6 +110,9 @@ class AnalysisSnapshot:
             "source_page_id": self.source_page_id, "source_hash": self.source_hash,
             "audit_status": self.audit_status,
         }
+        # 구버전 신호와의 payload 호환을 위해 score는 있을 때만 싣는다.
+        if self.score is not None:
+            payload["score"] = self.score
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 

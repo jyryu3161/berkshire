@@ -35,6 +35,9 @@ def _configure(args) -> None:
         "rebalance_deadband": args.rebalance_deadband,
         "daily_turnover_limit": args.daily_turnover_limit,
         "trailing_stop_pct": args.trailing_stop_pct,
+        "watch_entry_min_score": args.watch_entry_min_score,
+        "watch_entry_weight": args.watch_entry_weight,
+        "max_positions": args.max_positions,
         "max_signal_age_days": args.max_signal_age_days,
         "min_order_krw": args.min_order_krw,
     }
@@ -139,7 +142,8 @@ def _run(args) -> int:
     logger = NotionExecutionLogger(
         notion_token, live.execution_log_database_id, runtime
     )
-    engine = ExecutionEngine(broker, ledger, logger, strategy)
+    engine = ExecutionEngine(broker, ledger, logger, strategy,
+                             entry_gate_path=args.entry_gate)
     run_id = engine.run(signals)
     status = ledger.db.execute(
         "SELECT status FROM runs WHERE run_id=?", (run_id,)
@@ -168,6 +172,9 @@ def main() -> None:
     configure.add_argument("--rebalance-deadband", type=float)
     configure.add_argument("--daily-turnover-limit", type=float)
     configure.add_argument("--trailing-stop-pct", type=float)
+    configure.add_argument("--watch-entry-min-score", type=float)
+    configure.add_argument("--watch-entry-weight", type=float)
+    configure.add_argument("--max-positions", type=int)
     configure.add_argument("--max-signal-age-days", type=int)
     configure.add_argument("--min-order-krw", type=int)
     run = sub.add_parser("run")
@@ -179,6 +186,7 @@ def main() -> None:
     run.add_argument("--db", default=_local("ledger.sqlite3"))
     run.add_argument("--runtime-log", default=_local("runtime.jsonl"))
     run.add_argument("--signals-dir", default=_local("signals"))
+    run.add_argument("--entry-gate", default=_local("entry_gate.json"))
     args = parser.parse_args()
     if args.command == "show-strategy":
         StrategyConfig.load(args.strategy_config)

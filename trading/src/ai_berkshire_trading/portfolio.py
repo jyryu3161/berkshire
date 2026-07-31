@@ -28,25 +28,41 @@ def bands_reliable(bear: int, base: int) -> bool:
 
 
 def raw_target_weight(signal: AnalysisSnapshot, price: int, strategy_owned: int,
-                      max_single: Decimal = D("0.30")) -> Decimal:
-    """매수 신호의 계좌 목표 비중.
+                      max_single: Decimal = D("0.30"), *,
+                      watch_min_score: Decimal = D("3.5"),
+                      watch_cap: Decimal = D("0.15")) -> Decimal:
+    """신호의 계좌 목표 비중 — 등급별 계단식 규칙.
 
-    신규 진입 게이트: 밴드가 신뢰 가능하면 base 미만에서 분할 진입
-    (base 부근 절반 비중 → bear에서 풀비중), 밴드 폭이 과도하면
-    (방법 간 불일치) 종전대로 bear 이하에서만 진입한다. 보유 중이면
-    게이트 없이 곡선 비중을 그대로 따른다(가격 회복 시 점진 축소).
+    매수(BUY): 밴드 신뢰 시 base 미만 분할 진입(base 절반 → bear 풀비중),
+    밴드 폭 과도 시 bear 이하만. 보유 중이면 곡선 그대로.
+
+    관망(WATCH) + 종합점수 ≥ watch_min_score + 밴드 신뢰: 한 단계 엄격한
+    조건으로 보유 가능 — 신규 진입은 bear 이하(분석가의 매수 기준선)에서만,
+    비중은 watch_cap(기본 15%)으로 절반 제한. 매수→관망 하향 시 전량 청산
+    대신 이 상한으로 부분 축소되는 계단식 퇴출이 자연히 성립한다.
+
+    관망(점수 미달·밴드 불신·점수 없음)/보류/제외: 0 — 보유 중이면 전량 청산.
     """
-    if signal.verdict is not Verdict.BUY:
-        return D("0")
-    assert signal.targets_krw
     t = signal.targets_krw
-    if strategy_owned == 0:
-        if bands_reliable(t.bear, t.base):
-            if price >= t.base:
+    if signal.verdict is Verdict.BUY:
+        assert t
+        if strategy_owned == 0:
+            if bands_reliable(t.bear, t.base):
+                if price >= t.base:
+                    return D("0")
+            elif price > t.bear:
                 return D("0")
-        elif price > t.bear:
+        return max_single * price_multiplier(price, t.bear, t.base, t.bull)
+    if signal.verdict is Verdict.WATCH:
+        score = signal.score
+        if (score is None or D(str(score)) < watch_min_score or t is None
+                or not bands_reliable(t.bear, t.base)):
             return D("0")
-    return max_single * price_multiplier(price, t.bear, t.base, t.bull)
+        if strategy_owned == 0 and price > t.bear:
+            return D("0")
+        return min(max_single * price_multiplier(price, t.bear, t.base, t.bull),
+                   watch_cap)
+    return D("0")
 
 
 def scale_equity_weights(weights: dict[str, Decimal], max_equity: Decimal = D("0.70")) -> dict[str, Decimal]:

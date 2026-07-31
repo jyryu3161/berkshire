@@ -12,6 +12,9 @@ class Args:
     rebalance_deadband = None
     daily_turnover_limit = None
     trailing_stop_pct = None
+    watch_entry_min_score = None
+    watch_entry_weight = None
+    max_positions = None
     max_signal_age_days = None
     min_order_krw = None
 
@@ -89,6 +92,15 @@ def test_run_wires_engine_end_to_end(tmp_path, monkeypatch, signal):
         db = str(tmp_path / "ledger.sqlite3")
         runtime_log = str(tmp_path / "runtime.jsonl")
         signals_dir = str(tmp_path / "signals")
+        entry_gate = str(tmp_path / "entry_gate.json")
+
+    # 진입 게이트: 당일 허용 파일이 없으면 신규 매수가 차단되므로 허용 기록
+    from datetime import datetime
+    from ai_berkshire_trading.models import KST
+    (tmp_path / "entry_gate.json").write_text(_json.dumps({
+        "date": datetime.now(KST).strftime("%Y-%m-%d"),
+        "decisions": {"021240": {"allow": True, "reason": "테스트"}},
+    }))
 
     assert cli._run(Args()) == 0
     assert appended == ["a-1"]

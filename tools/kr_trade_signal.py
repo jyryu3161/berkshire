@@ -98,6 +98,7 @@ def build_trade_signal(report: dict, body_md: str, cycle_id: str) -> dict | None
         "targets_krw": targets,
         "source_hash": hashlib.sha256(body_md.encode("utf-8")).hexdigest(),
         "audit_status": "PASS",
+        "score": report.get("score"),
     }
 
 

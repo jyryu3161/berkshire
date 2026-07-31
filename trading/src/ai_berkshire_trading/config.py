@@ -24,6 +24,9 @@ class StrategyConfig:
     rebalance_deadband: Decimal
     daily_turnover_limit: Decimal
     trailing_stop_pct: Decimal
+    watch_entry_min_score: Decimal
+    watch_entry_weight: Decimal
+    max_positions: int
     max_signal_age_days: int
     min_order_krw: int
     live_trading_enabled: bool
@@ -56,9 +59,21 @@ class StrategyConfig:
         trailing = Decimal(str(raw.get("trailing_stop_pct", "0.10")))
         if not Decimal("0") < trailing < Decimal("1"):
             raise ValueError("trailing_stop_pct must be in (0, 1)")
+        watch_score = Decimal(str(raw.get("watch_entry_min_score", "3.5")))
+        if not Decimal("0") < watch_score <= Decimal("5"):
+            raise ValueError("watch_entry_min_score must be in (0, 5]")
+        watch_weight = Decimal(str(raw.get("watch_entry_weight", "0.15")))
+        if not Decimal("0") < watch_weight <= values["max_single_name_weight"]:
+            raise ValueError("watch_entry_weight must be in (0, max_single_name_weight]")
+        max_positions = int(raw.get("max_positions", 6))
+        if max_positions < 1:
+            raise ValueError("max_positions must be >= 1")
         return cls(
             capital_mode=mode, capital_cap_krw=cap, **values,
             trailing_stop_pct=trailing,
+            watch_entry_min_score=watch_score,
+            watch_entry_weight=watch_weight,
+            max_positions=max_positions,
             max_signal_age_days=int(raw["max_signal_age_days"]),
             min_order_krw=int(raw["min_order_krw"]),
             live_trading_enabled=bool(raw["live_trading_enabled"]),

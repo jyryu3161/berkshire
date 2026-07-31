@@ -1,0 +1,10 @@
+[Unit]
+Description=Run AI Berkshire entry gate at 13:50 KST on weekdays
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 13:50:00 Asia/Seoul
+Persistent=false
+Unit=ai-berkshire-entry-gate.service
+
+[Install]
+WantedBy=timers.target
