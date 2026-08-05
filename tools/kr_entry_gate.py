@@ -73,7 +73,8 @@ def _judge(c):
     )
     try:
         r = subprocess.run(
-            [_CLAUDE, "-p", prompt, "--dangerously-skip-permissions"],
+            [_CLAUDE, "-p", prompt, "--model", "claude-opus-5",
+             "--dangerously-skip-permissions"],
             capture_output=True, text=True, timeout=600, cwd=_ROOT)
         matches = re.findall(r'\{[^{}]*"allow"[^{}]*\}', r.stdout)
         if matches:
