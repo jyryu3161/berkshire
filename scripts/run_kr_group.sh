@@ -82,5 +82,5 @@ report.json 필드는 kr-weekly-picks.md 규격을 따르고 body_md에 % 리터
 
 # 안전장치: 혹시 백그라운드 작업이 남더라도 넉넉히 대기(강제종료로 인한 미발행 방지, 40분)
 export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=2400000
-/home/ubuntu/.local/bin/claude -p "$PROMPT" --dangerously-skip-permissions >>"$LOG" 2>&1
+/home/ubuntu/.local/bin/claude -p "$PROMPT" --model claude-sonnet-5 --dangerously-skip-permissions >>"$LOG" 2>&1
 echo "===== [$(date '+%F %T %Z')] 그룹 종료 exit=$? =====" >>"$LOG"
